@@ -118,4 +118,4 @@ or this repository's issues. Security problems: see [SECURITY.md](SECURITY.md).
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+MIT, copyright (c) 2026 subnetangel. See [LICENSE](LICENSE).

@@ -4,7 +4,7 @@
   "displayName": "A2A: Bots ask each other",
   "description": "Lets one of your Bots ask another Bot a question and get that Bot's own answer, from its own memory and tools, in its own thread. It speaks A2A v1.0 JSON-RPC on the gateway's existing authenticated routes and opens no port of its own. You decide which Bot may ask which; everything else is refused, answers are answer-only, and every exchange is logged.",
   "author": "subnetangel",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "minKiroCrewVersion": "0.13.0",
   "tags": [
     "agents",
