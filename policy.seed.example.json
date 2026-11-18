@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "scope": "answer_only",
+  "max_turns_per_context": 5,
+  "allow": {},
+  "_shape": "allow maps an asking Bot id to the Bot ids it may ask, for example {\"assistant\": [\"researcher\"]}. Empty means nobody may ask anybody."
+}

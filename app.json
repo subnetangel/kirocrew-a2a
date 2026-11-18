@@ -1,0 +1,90 @@
+{
+  "name": "a2a",
+  "version": "0.4.5",
+  "displayName": "A2A: Bots ask each other",
+  "description": "Lets one of your Bots ask another Bot a question and get that Bot's own answer, from its own memory and tools, in its own thread. It speaks A2A v1.0 JSON-RPC on the gateway's existing authenticated routes and opens no port of its own. You decide which Bot may ask which; everything else is refused, answers are answer-only, and every exchange is logged.",
+  "author": "subnetangel",
+  "license": "Apache-2.0",
+  "minKiroCrewVersion": "0.13.0",
+  "tags": [
+    "agents",
+    "orchestration",
+    "collaboration",
+    "a2a",
+    "bots"
+  ],
+  "highlights": [
+    "A Bot asks another Bot and gets that Bot's own answer, from its live thread with its own memory",
+    "No new listener: Agent Card and JSON-RPC ride the gateway's own authenticated routes",
+    "Deny by default: you list which Bot may ask which",
+    "Answer-only scope, 5 turns per conversation by default (owner limit up to 10), peer text fenced as untrusted data",
+    "Credentials scrubbed both ways and every exchange in an audit log",
+    "Ask several Bots at once (a2a_orchestrate) inside an owner-set Bot and time budget",
+    "One press turns A2A on for every Bot, after showing every change",
+    "Health per Bot, with Repair: a mount that survives Kiro Crew upgrades",
+    "Live activity feed by conversation and orchestration run, refusals marked"
+  ],
+  "defaultEnabled": false,
+  "platform": {
+    "os": [
+      "linux",
+      "macos"
+    ]
+  },
+  "backend": {
+    "hooks": {
+      "routes": "backend.routes:register_routes",
+      "on_startup": "backend.hooks:on_startup",
+      "on_shutdown": "backend.hooks:on_shutdown"
+    }
+  },
+  "mcpServers": {
+    "a2a": {
+      "command": "python3",
+      "args": [
+        "backend/mcp_server.py"
+      ],
+      "x-kirocrew-session-label": true
+    }
+  },
+  "permissions": {
+    "api": [
+      "/api/apps/a2a",
+      "/api/apps/a2a/*",
+      "/api/agents/b64",
+      "/api/chat",
+      "/api/members"
+    ],
+    "sessionApproval": true,
+    "memberThreads": true,
+    "bots": [
+      "read"
+    ]
+  },
+  "agentReadOnlyDirs": [
+    "results"
+  ],
+  "iconPath": "assets/store-icon.png",
+  "iconUrl": "/apps/a2a/ui/icon.png",
+  "ui": {
+    "entry": "index.mjs",
+    "pages": [
+      {
+        "route": "/a2a",
+        "label": "A2A",
+        "iconUrl": "nav-icon.png"
+      }
+    ]
+  },
+  "heroImage": "assets/hero.png",
+  "links": [
+    {
+      "label": "Source",
+      "url": "https://github.com/subnetangel/kirocrew-a2a"
+    },
+    {
+      "label": "Report a security issue",
+      "url": "https://github.com/subnetangel/kirocrew-a2a/security/advisories/new"
+    }
+  ]
+}
