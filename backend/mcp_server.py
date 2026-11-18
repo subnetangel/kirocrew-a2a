@@ -149,8 +149,24 @@ def tool_list(args: dict, meta=None, root: Path = None) -> str:
     if not res.get("ok"):
         return _err(res)
     peers = ", ".join(res.get("peers") or []) or "none (ask your owner to allow one)"
-    return (f"You are '{res.get('caller')}'. Bots you may message: {peers}. "
-            f"Scope: {res.get('scope')}; at most {res.get('max_turns')} turns per context.")
+    lines = [f"You are '{res.get('caller')}'. Bots you may message: {peers}. "
+             f"Scope: {res.get('scope')}; at most {res.get('max_turns')} turns per context."]
+    if "chief_of_staff" in res:  # absent from a pre-0.6.1 dispatcher
+        owner = res.get("owner_name")
+        lines.append((f"Owner: {owner}. " if owner else "")
+                     + f"Chief of Staff: {'yes, you' if res.get('chief_of_staff') else 'no'}. "
+                     + f"Chief of Staff may assign work (cos_can_assign): {'on' if res.get('cos_can_assign') else 'off'}.")
+    modes = res.get("assign_modes")
+    if isinstance(modes, list):
+        def how(m: dict) -> str:
+            if m.get("read_waits") and m.get("change_waits"):
+                return "every assignment waits for your owner's Approve"
+            if m.get("change_waits"):
+                return "read-only goes out at once, change waits for your owner's Approve"
+            return "goes out at once"
+        lines.append("Assign mode per Bot you may assign to: "
+                     + ("; ".join(f"{m.get('agent')} {m.get('mode')} ({how(m)})" for m in modes) or "none") + ".")
+    return "\n".join(lines)
 
 
 def tool_discover(args: dict, meta=None, root: Path = None) -> str:
@@ -346,7 +362,8 @@ def _s(desc: str) -> dict:
 
 
 TOOLS = {
-    "a2a_list": (tool_list, "List the Bots your owner's a2a policy lets you message, and the limits.", {}, []),
+    "a2a_list": (tool_list, "List the Bots your owner's a2a policy lets you message, the limits, and your "
+                 "Chief of Staff settings (whether you are it, whether it may assign, assign modes).", {}, []),
     "a2a_discover": (tool_discover, "Read another Bot's A2A Agent Card (name, description, skills).",
                      {"agent": _s("The Bot id, e.g. researcher.")}, ["agent"]),
     "a2a_call": (tool_call,

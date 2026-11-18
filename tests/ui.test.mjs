@@ -4,7 +4,7 @@ import test from 'node:test'
 import { filterItems, groupRows, reasonText } from '../ui/lib/feed.mjs'
 import { commit, forgetReview, prepare, reviewFor, verify, with503Retry } from '../ui/lib/apply.mjs'
 import { autoHeal, undoHeal } from '../ui/lib/heal.mjs'
-import { ageText, effectiveMode, modeOptions, needsYoloConfirm, parseTerms } from '../ui/lib/cos.mjs'
+import { OPEN, STATUS_TONE, STATUS_WORD, ageText, effectiveMode, modeOptions, needsYoloConfirm, parseTerms } from '../ui/lib/cos.mjs'
 
 const rows = [
   { ts: '2026-11-18T00:00:01Z', op: 'send', outcome: 'delivering', caller: 'assistant', target: 'researcher', context: 'c1', turn: 1 },
@@ -394,4 +394,11 @@ test('watch terms parse one per line or comma, de-duplicated', () => {
   assert.deepEqual(parseTerms('Atlas, atlas\n  Big   Rock \n\n'), ['Atlas', 'Big Rock'])
   assert.equal(ageText(30), 'just now')
   assert.equal(ageText(7200), '2 h')
+})
+
+test('a reply with no update and a timeout read as neither done nor open', () => {
+  assert.equal(STATUS_WORD.replied, 'Replied, no update')
+  assert.equal(STATUS_WORD.no_reply, 'No reply')
+  assert.notEqual(STATUS_TONE.replied, STATUS_TONE.done)
+  assert.ok(!OPEN.has('replied') && !OPEN.has('no_reply'))
 })

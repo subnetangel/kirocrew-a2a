@@ -462,10 +462,7 @@ async def _handle_entry(svc: A2AService, path: Path) -> None:
             rows = svc.history(caller, str(entry.get("context_id") or ""), int(entry.get("limit") or 50))
             _write_result(store, rid, {"ok": True, "messages": rows})
         elif op == "list":
-            policy = store.policy()
-            peers = sorted(policy.allow.get(caller, ()))
-            _write_result(store, rid, {"ok": True, "caller": caller, "peers": peers,
-                                       "max_turns": policy.max_turns, "scope": policy.scope})
+            _write_result(store, rid, {"ok": True, **svc.list_info(caller)})
         elif op == "discover":
             target = str(entry.get("agent") or "").strip().lower()
             if not store.policy().permits(caller, target) or not bot_name(target):

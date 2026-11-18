@@ -932,6 +932,32 @@ class A2AService:
         return {"escalations": self.inbox_items(),
                 "assignments": [cos.public_assignment(a) for a in self.assignments(by=caller, limit=50)]}
 
+    def list_info(self, caller: str) -> dict:
+        """What a2a_list shows *caller*: its peers and limits, and its own Chief of Staff
+        settings. Only what a refusal or a frame already tells it: whether it is the
+        Chief of Staff (the "you are not it" refusal), cos_can_assign (the first a2a_assign
+        refusal, for any caller), the owner name (in every roll call and assignment frame,
+        so roster Bots only), and for the Chief of Staff alone, the mode each Bot it may
+        assign to would get (returned on every assignment it makes)."""
+        policy = self.store.policy()
+        peers = sorted(policy.allow.get(caller, ()))
+        is_chief = bool(policy.chief_of_staff) and caller == policy.chief_of_staff
+        out = {"caller": caller, "peers": peers, "max_turns": policy.max_turns, "scope": policy.scope,
+               "chief_of_staff": is_chief, "cos_can_assign": policy.cos_can_assign}
+        if is_chief or self.gw.is_roster(caller):
+            out["owner_name"] = policy.owner_name
+        if is_chief:
+            modes = []
+            for t in peers if policy.cos_can_assign else ():
+                if t == caller or not policy.accepts(t) or not self.gw.resolve_target(t) or not self.gw.is_roster(t):
+                    continue
+                mode = cos.effective_mode(policy.assign_mode_default, policy.assign_mode_by_bot, t,
+                                          self.gw.mode_permitted)
+                modes.append({"agent": t, "mode": mode, "read_waits": cos.routes_to_queue(mode, "read"),
+                              "change_waits": cos.routes_to_queue(mode, "change")})
+            out["assign_modes"] = modes
+        return out
+
     def mode_ceiling(self) -> dict:
         out = {}
         for mode in cos.MODES:
@@ -1017,14 +1043,24 @@ class A2AService:
         self._audit("assign", "sent", caller=asg["by"], target=asg["target"], task=asg_id, mode=asg.get("mode"))
 
         async def go() -> None:
-            note = ""
+            note, source = "", ""
             try:
-                await asyncio.wait_for(self.gw.deliver(asg["target"], framed, banner), timeout=3600)
-                return
+                reply = await asyncio.wait_for(self.gw.deliver(asg["target"], framed, banner),
+                                               timeout=cos.DELIVERY_WATCH_SECS)
+                # The turn ended. If the Bot sent no a2a_update (its chat may run an MCP
+                # server older than the tool), its own reply is the status: the same reply
+                # a2a_call collects, scrubbed, defanged and capped, marked as a reply.
+                status, source = cos.REPLIED, "reply"
+                try:
+                    note = cos.reply_note(self._scrub((reply or "").strip()[:MAX_REPLY_CHARS]), self.gw.neutralize)
+                except A2AError:  # redaction unavailable: record that it replied, never the raw text
+                    note = cos.REPLY_NOTE_PREFIX + "(not recorded: redaction was unavailable)"
             except asyncio.CancelledError:
                 return
             except asyncio.TimeoutError:
-                return  # still running in the Bot's thread; a2a stopped watching
+                note = (f"No reply within {cos.DELIVERY_WATCH_SECS // 60} minutes and no a2a_update; a2a stopped "
+                        "watching. The Bot may still be working in its own chat.")
+                status = cos.NO_REPLY
             except Queued:
                 note = "Queued behind the Bot's current turn; it will start after that."
                 status = "sent"
@@ -1038,10 +1074,13 @@ class A2AService:
                 self._asg_inflight.pop(asg_id, None)
             rows2 = self.cos.load("assignments")
             cur = next((r for r in rows2 if r.get("id") == asg_id), None)
+            # Only a row still at "sent" changes: an a2a_update (or a cancel) that arrived
+            # during the turn already says more, so the reply is not recorded twice.
             if cur is not None and cur.get("status") == "sent":
-                cos.set_status(cur, status, note, time.time(), "a2a")
+                cos.set_status(cur, status, note, time.time(), cur["target"] if source else "a2a", source)
                 self.cos.save("assignments", rows2, cos.ASSIGN_KEEP)
-                self._audit("assign", status, caller=asg["by"], target=asg["target"], task=asg_id, note=note[:120])
+                self._audit("assign", status, caller=asg["by"], target=asg["target"], task=asg_id,
+                            note=note[:120] if not source else f"reply {len(note)} chars")
 
         try:
             fut = asyncio.ensure_future(go())

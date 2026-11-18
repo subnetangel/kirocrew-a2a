@@ -110,7 +110,7 @@ the store keeps offering an update that never clears.
 
 | Tool | What it does |
 |---|---|
-| `a2a_list` | Which Bots you may message, and the limits |
+| `a2a_list` | Which Bots you may message, the limits, and your Chief of Staff settings |
 | `a2a_discover(agent)` | That Bot's Agent Card |
 | `a2a_call(agent, message, context_id?)` | Ask; returns the reply and a context id for follow-ups |
 | `a2a_orchestrate(agents, message)` | Ask several Bots at once, inside the owner's Bot and time budget |
@@ -174,6 +174,14 @@ Every new setting starts off or at its most cautious value:
   Bot can be opted out, assignments share the send rate limit, and one with no
   update for 24 hours closes as stale. Cancel stops a2a following the work; it
   cannot stop a turn the Bot already started.
+
+## Changes in 0.6.1
+
+- When a Bot can't call `a2a_update`, its final reply now counts as its
+  assignment update. The assignment shows "Replied, no update", never Done.
+- `a2a_list` now shows the Chief of Staff settings.
+- After updating, reload each Bot's chat so it gets the current a2a tools.
+- Permissions are unchanged from 0.6.0.
 
 ## HTTP (A2A clients)
 

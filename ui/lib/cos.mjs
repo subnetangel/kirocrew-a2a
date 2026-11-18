@@ -57,12 +57,12 @@ export function ageText(secs) {
 
 export const STATUS_TONE = {
   queued: 'working', sent: 'working', working: 'working', done: 'answered', blocked: 'failed',
-  canceled: 'info', rejected: 'refused', stale: 'info',
+  canceled: 'info', rejected: 'refused', stale: 'info', replied: 'info', no_reply: 'failed',
 }
 
 export const STATUS_WORD = {
   queued: 'Waiting for you', sent: 'Sent', working: 'Working', done: 'Done', blocked: 'Blocked',
-  canceled: 'Canceled', rejected: 'Rejected', stale: 'Stale',
+  canceled: 'Canceled', rejected: 'Rejected', stale: 'Stale', replied: 'Replied, no update', no_reply: 'No reply',
 }
 
 export const OPEN = new Set(['queued', 'sent', 'working'])

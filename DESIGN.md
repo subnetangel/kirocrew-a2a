@@ -519,6 +519,28 @@ and the tool and the page both say so. Visibility: the Chief of Staff tab (queue
 with status, last note and age), each Bot's panel tab ("Assigned to me"), and `a2a_inbox`
 for the Chief of Staff.
 
+**When the Bot cannot call `a2a_update` (0.6.1).** A chat whose a2a MCP server process
+started before the app was upgraded serves the old tool list, so the assigned Bot may do
+the work and have no `a2a_update` to report it. a2a already holds the delivered turn's
+reply (the same `/api/chat` stream `a2a_call` reads), so no new permission is needed:
+when the turn ends and the row is still `sent`, that reply is scrubbed, defanged like
+other peer text, put on one line, capped at 500 characters with the prefix "From the
+Bot's reply (it sent no a2a_update):", stored as the note (`source: reply`), and the
+status becomes `replied`, never `done`. If an `a2a_update` or a cancel arrived during
+the turn the row is no longer `sent` and the reply is not recorded. If the turn does not
+end within 3600 s, the status becomes `no_reply` instead of staying `sent`. Neither
+state is open (it holds no open slot and is not stale-closed), and the Bot may still
+`a2a_update` from either. The frame adds: "If a2a_update is not in your tools, end your
+turn with a one-line status per item; that reply is recorded."
+
+**`a2a_list` (0.6.1).** Adds what the caller could already learn from a refusal or a
+frame: whether it is the Chief of Staff (the "you are not it" refusal), whether
+`cos_can_assign` is on (the first `a2a_assign` refusal, for any caller), the owner name
+(roster Bots and the Chief of Staff, who see it in every roll call and assignment frame),
+and for the Chief of Staff alone the effective mode for each Bot it may assign to (it gets
+that mode back on every assignment). Who the Chief of Staff is, other Bots' allow lists
+and opted-out Bots' modes are not shown.
+
 **Tools on every Bot.** The new tools join the auto-heal list like 0.5.1's, so every Bot
 can see them. Each is gated in the backend by who the gateway says is calling, so a Bot
 that is not the Chief of Staff gets a refusal, not a capability.

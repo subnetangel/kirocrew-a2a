@@ -1,6 +1,6 @@
 {
   "name": "a2a",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "displayName": "A2A: Bots ask each other",
   "description": "Lets one of your Bots ask another Bot a question and get that Bot's own answer, from its own memory and tools, in its own thread. Speaks the A2A v1.0 JSON-RPC protocol on the gateway's existing authenticated routes and opens no port of its own. You decide which Bot may ask which; everything else is refused. Peer questions are answer-only, at most 5 turns per conversation by default (up to 10), and every exchange is logged. Optional Chief of Staff mode: one Bot you pick runs roll calls, collects escalations from the others and, only if you turn it on, assigns work that waits for your Approve unless you choose a looser approval mode.",
   "author": "subnetangel",
