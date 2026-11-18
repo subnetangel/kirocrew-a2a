@@ -4,6 +4,7 @@ import test from 'node:test'
 import { filterItems, groupRows, reasonText } from '../ui/lib/feed.mjs'
 import { commit, forgetReview, prepare, reviewFor, verify, with503Retry } from '../ui/lib/apply.mjs'
 import { autoHeal, undoHeal } from '../ui/lib/heal.mjs'
+import { ageText, effectiveMode, modeOptions, needsYoloConfirm, parseTerms } from '../ui/lib/cos.mjs'
 
 const rows = [
   { ts: '2026-11-18T00:00:01Z', op: 'send', outcome: 'delivering', caller: 'assistant', target: 'researcher', context: 'c1', turn: 1 },
@@ -370,4 +371,27 @@ test('auto-heal is off when the owner turns it off, and Undo removes exactly wha
   assert.deepEqual(await undoHeal(client, r.healed, { retryDelayMs: 1 }), [])
   const put = client.calls.find(c => c[0] === 'PUT')
   assert.deepEqual(put[2], healOps.map(o => ({ section: 'allowedTools', id: o.id, action: 'remove' })))
+})
+
+test('approval modes the ceiling denies are disabled, and fall back to Approve', () => {
+  const ceiling = { normal: true, trust_reads: true, trust: false, yolo: false }
+  assert.deepEqual(modeOptions(ceiling).map(o => [o.label, o.disabled]),
+    [['Approve', false], ['Trust reads', false], ['Trust', true], ['YOLO', true]])
+  assert.deepEqual(modeOptions(null).filter(o => !o.disabled).map(o => o.id), ['normal'])
+  assert.equal(effectiveMode({ assign_mode_default: 'trust' }, 'a', ceiling), 'normal')
+  assert.equal(effectiveMode({ assign_mode_default: 'trust', assign_mode_by_bot: { a: 'trust_reads' } }, 'a', ceiling), 'trust_reads')
+})
+
+test('turning YOLO on needs the confirm; keeping it on does not', () => {
+  const off = { assign_mode_default: 'normal' }
+  const on = { assign_mode_default: 'normal', assign_mode_by_bot: { a: 'yolo' } }
+  assert.equal(needsYoloConfirm(off, on), true)
+  assert.equal(needsYoloConfirm(off, { ...on, confirm_yolo: true }), false)
+  assert.equal(needsYoloConfirm(on, on), false)
+})
+
+test('watch terms parse one per line or comma, de-duplicated', () => {
+  assert.deepEqual(parseTerms('Atlas, atlas\n  Big   Rock \n\n'), ['Atlas', 'Big Rock'])
+  assert.equal(ageText(30), 'just now')
+  assert.equal(ageText(7200), '2 h')
 })

@@ -1,8 +1,8 @@
 {
   "name": "a2a",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "displayName": "A2A: Bots ask each other",
-  "description": "Lets one of your Bots ask another Bot a question and get that Bot's own answer, from its own memory and tools, in its own thread. Speaks the A2A v1.0 JSON-RPC protocol on the gateway's existing authenticated routes and opens no port of its own. You decide which Bot may ask which; everything else is refused. Answer-only, at most 5 turns per conversation by default (up to 10), and every exchange is logged.",
+  "description": "Lets one of your Bots ask another Bot a question and get that Bot's own answer, from its own memory and tools, in its own thread. Speaks the A2A v1.0 JSON-RPC protocol on the gateway's existing authenticated routes and opens no port of its own. You decide which Bot may ask which; everything else is refused. Peer questions are answer-only, at most 5 turns per conversation by default (up to 10), and every exchange is logged. Optional Chief of Staff mode: one Bot you pick runs roll calls, collects escalations from the others and, only if you turn it on, assigns work that waits for your Approve unless you choose a looser approval mode.",
   "author": "subnetangel",
   "license": "MIT",
   "minKiroCrewVersion": "0.13.0",
@@ -23,7 +23,11 @@
     "One press turns A2A on for every Bot, after showing every change",
     "Health per Bot, with Repair: a mount that survives Kiro Crew upgrades",
     "Live activity feed by conversation and orchestration run, refusals marked",
-    "An A2A tab in each Bot's chat side panel: its health, pairs, conversations and open tasks"
+    "An A2A tab in each Bot's chat side panel: its health, pairs, conversations and open tasks",
+    "Chief of Staff mode: one Bot you pick may ask every Bot at once; the others are held to a smaller fan-out",
+    "Roll call: one status question to every Bot, merged into a brief with overlapping tickets flagged; optional daily schedule, off by default",
+    "Escalation inbox: any Bot can flag what needs you, de-duplicated, with Done and Dismiss",
+    "Assignments (off by default): the Chief of Staff assigns work that follows Kiro Crew's approval modes, Approve by default, never widening a Bot's tools"
   ],
   "defaultEnabled": false,
   "platform": {

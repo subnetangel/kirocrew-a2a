@@ -22,6 +22,9 @@ Requires Kiro Crew 0.13.0 or later (App Kit seam level 9), on Linux or macOS.
   (`A2A · <Bot> asks · turn 1/5`); the full message is one click away.
 - The **A2A** page (sidebar) shows who may ask whom, the limits, per-Bot health,
   and a live feed of every exchange with question and answer.
+- Optional **Chief of Staff mode** (0.6): one Bot you pick runs roll calls,
+  collects escalations from the other Bots, flags work two Bots both mention, and,
+  only if you turn it on, assigns work. See [Chief of Staff mode](#chief-of-staff-mode-06).
 
 ## Safety model
 
@@ -29,6 +32,8 @@ Requires Kiro Crew 0.13.0 or later (App Kit seam level 9), on Linux or macOS.
   pairs on the A2A page; the policy is stored where no agent sandbox can write it.
 - **Answer-only.** The asked Bot is told to reply in plain text and change
   nothing. The asked Bot's own approval mode still applies to any tool it calls.
+  The one exception is a Chief of Staff assignment, which is off unless you turn
+  it on and waits for your Approve by default.
 - **Untrusted-text fencing.** The peer's words reach the asked Bot inside a fence
   marked as untrusted data from another Bot, never as instructions from you.
   Forged fence markers are filtered, no peer line can start a slash command, and
@@ -111,6 +116,64 @@ the store keeps offering an update that never clears.
 | `a2a_orchestrate(agents, message)` | Ask several Bots at once, inside the owner's Bot and time budget |
 | `a2a_result(request_id)` | Fetch a reply that took longer than 100 s |
 | `a2a_history(context_id)` | A conversation you took part in |
+| `a2a_cancel(task_id)`, `a2a_tasks()` | Cancel or list your own tasks (and, for the Chief of Staff, its `asg_...` assignments) |
+| `a2a_escalate(title, why, ask)` | Any Bot but the Chief of Staff: flag something that needs you to the Chief of Staff's inbox |
+| `a2a_rollcall(question?)` | Chief of Staff only: one status question to every Bot, merged into a brief |
+| `a2a_inbox()` | Chief of Staff only: open escalations and its assignments' status |
+| `a2a_assign(agent, title, brief, done_when, kind?)` | Chief of Staff only, when you allow it: assign work |
+| `a2a_update(task_id, status, note)` | The assigned Bot only: `working`, `done` or `blocked` |
+
+## Chief of Staff mode (0.6)
+
+Pick one Bot as your Chief of Staff on the A2A page (**Chief of Staff** tab). None is
+set until you pick one; the tab offers a suggestion you can take with one click.
+
+Every new setting starts off or at its most cautious value:
+
+| Setting | Default |
+|---|---|
+| `chief_of_staff` | none |
+| `rollcall_schedule.enabled` (daily roll call) | off (06:45 America/Chicago once on) |
+| `watch_terms` (project names to flag) | empty |
+| `cos_can_assign` (assignments) | off |
+| `assign_mode_default` | `normal` (Approve) |
+| `fanout_others` | 3 Bots per question for every Bot but the Chief of Staff |
+| `max_open_assignments` | 3 per Bot |
+
+- **Fan-out.** Only the Chief of Staff may ask `"all"` Bots or more than
+  `fanout_others` Bots in one `a2a_orchestrate` (default 3, 1 to 16). Every other
+  Bot's longer list is refused, never trimmed. With no Chief of Staff set, nobody
+  may ask `"all"`.
+- **Roll call.** `a2a_rollcall` asks every one of your Bots "In-flight work, blocked
+  items, and anything that needs you (one line each)." It is a status question only.
+  The brief (each Bot's answer, or no-chat / timeout) is stored, the latest 10 show on
+  the tab, and identifiers two Bots both name (`CR-123`, `P1234567`, `V123456789`,
+  SIM-style `ABC-123`, and the project names you list) appear under **Overlaps**.
+  Each roll call costs every Bot one turn. Overlaps are detection only; nothing
+  acts on them.
+- **Daily roll call.** A toggle on the tab, off by default, at 06:45
+  America/Chicago unless you change it. The schedule runs inside the gateway (see
+  DESIGN.md for why it is not an app cron), so it needs no extra permission.
+- **Escalations.** Any Bot but the Chief of Staff can `a2a_escalate`. A repeat of the
+  same title from the same Bot bumps a count. You close items with Done or Dismiss;
+  the Chief of Staff reads open ones with `a2a_inbox`. Fields are capped at
+  200/500/300 characters and share the send rate limit.
+- **Assignments.** Off until you tick "Let the Chief of Staff assign work". Each
+  assignment follows an approval mode, set as a default and per Bot:
+
+  | Mode | What happens |
+  |---|---|
+  | Approve (`normal`, default) | Waits on the tab for Approve, Edit or Reject |
+  | Trust reads | `kind: read` goes out at once as a read-only assignment; `change` waits |
+  | Trust | Goes out at once and shows as unread on the tab |
+  | YOLO | Goes out at once with no notice and no "ask first" line; needs a confirm, and the tab shows a red banner while it is on |
+
+  A mode your Kiro Crew approval policy denies is greyed out and treated as Approve.
+  The assigned Bot gets a new chat turn and works under its own tools and approval
+  mode; a2a never widens either. At most 3 open assignments per Bot (1 to 10), a
+  Bot can be opted out, assignments share the send rate limit, and one with no
+  update for 24 hours closes as stale. Cancel stops a2a following the work; it
+  cannot stop a turn the Bot already started.
 
 ## HTTP (A2A clients)
 
@@ -130,6 +193,11 @@ the allow list.
   per-turn tool profile.
 - An app cannot read a Bot's transcript, so a message the gateway queues behind a
   busy Bot is answered in that Bot's chat only.
+- A Chief of Staff reads untrusted text (mail, chat, tickets), and its assignment
+  text can carry that forward. That is why assignments are off by default and wait
+  for your Approve; looser modes trade that review for speed.
+- The daily roll call runs inside the gateway, not as a Kiro Crew cron, so it does
+  not appear on the Schedule page.
 
 ## Tests
 

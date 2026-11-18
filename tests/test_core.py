@@ -402,18 +402,18 @@ def test_orchestrate_time_budget(tmp_path):
 
 def test_orchestrate_all_expands_to_every_allowed_bot(tmp_path):
     policy = {**ORCH, "allow": {"assistant": ["researcher", "writer", "planner", "ghost"]},
-              "orchestrate": {"max_bots": 3, "time_budget_secs": 5}}
+              "orchestrate": {"max_bots": 3, "time_budget_secs": 5}, "chief_of_staff": "assistant"}
     svc, host = make(tmp_path, policy)
     out = run(svc.orchestrate("assistant", "Assistant", ["all"], "status?"))
     # Every Bot the policy lets the caller ask that exists ("ghost" does not), each answer tagged.
     assert [r["agent"] for r in out["results"]] == ["planner", "researcher", "writer"]
     assert {s for s, _ in host.delivered} == {"planner", "researcher", "writer"}
-    with pytest.raises(core.A2AError, match="no Bot"):
+    with pytest.raises(core.A2AError, match="Chief of Staff"):
         run(svc.orchestrate("writer", "Writer", ["all"], "q"))
 
 
 def test_orchestrate_all_over_the_cap_is_refused_not_trimmed(tmp_path):
-    svc, host = make(tmp_path, ORCH)  # max_bots 2, three Bots allowed
+    svc, host = make(tmp_path, {**ORCH, "chief_of_staff": "assistant"})  # max_bots 2, three Bots allowed
     with pytest.raises(core.A2AError, match="asks 3 Bots and your owner allows at most 2"):
         run(svc.orchestrate("assistant", "Assistant", ["all"], "q"))
     assert host.delivered == []
@@ -421,7 +421,7 @@ def test_orchestrate_all_over_the_cap_is_refused_not_trimmed(tmp_path):
 
 
 def test_orchestrate_partial_failure_keeps_the_other_answers(tmp_path):
-    policy = {**ORCH, "orchestrate": {"max_bots": 3, "time_budget_secs": 1}}
+    policy = {**ORCH, "orchestrate": {"max_bots": 3, "time_budget_secs": 1}, "chief_of_staff": "assistant"}
     svc, _ = make(tmp_path, policy)
 
     async def mixed(slug, text, banner=""):
@@ -593,7 +593,7 @@ def test_orchestrate_all_skips_off_roster_agents_and_they_do_not_count(tmp_path)
     BOTS["mate"] = "mate"
     try:
         policy = {"allow": {"assistant": ["assistant", "researcher", "writer", "mate"]},
-                  "orchestrate": {"max_bots": 2, "time_budget_secs": 5}}
+                  "orchestrate": {"max_bots": 2, "time_budget_secs": 5}, "chief_of_staff": "assistant"}
         svc, host = make(tmp_path, policy)
         svc.gw.is_roster = lambda slug: slug != "mate"
         out = run(svc.orchestrate("assistant", "Assistant", ["all"], "q"))

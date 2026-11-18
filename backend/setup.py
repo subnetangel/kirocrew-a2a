@@ -29,7 +29,8 @@ TOOL_REF = f"@{SERVER_ID}"
 #: The tools a Bot needs for a2a to work (0.4.x). Missing one is "Needs repair".
 CORE_TOOLS = ("a2a_list", "a2a_discover", "a2a_call", "a2a_orchestrate", "a2a_result", "a2a_history")
 #: Tools added since. Missing one is "Update available": the Bot still works.
-TOOL_NAMES = CORE_TOOLS + ("a2a_cancel", "a2a_tasks")
+TOOL_NAMES = CORE_TOOLS + ("a2a_cancel", "a2a_tasks", "a2a_rollcall", "a2a_escalate", "a2a_inbox",
+                             "a2a_assign", "a2a_update")
 #: System interpreters, in order. Never the gateway's own versioned runtime.
 PYTHON_CANDIDATES = ("/usr/bin/python3", "/usr/local/bin/python3", "/opt/homebrew/bin/python3")
 #: A path segment that marks the gateway's private, per-version runtime.

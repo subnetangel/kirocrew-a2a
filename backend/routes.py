@@ -14,6 +14,9 @@ assert who is calling.
 - ``GET  /session-bot?key=``, ``GET /bot/{slug}``, ``POST /tasks/{id}/cancel``:
   owner only, for the per-Bot chat side-panel tab. The session key is resolved to a
   Bot only through the gateway's own records (``hooks.caller_slug_for_session``).
+- ``GET  /chief-of-staff``, ``POST /inbox/{id}``, ``POST /assignments/{id}``: owner
+  only, the Chief of Staff tab (0.6): roll-call briefs, the escalation inbox and the
+  assignment queue with Approve / Edit / Reject / Cancel.
 - ``GET  /setup``                          owner only: the one-click setup plan and
   each Bot's a2a health, read only. The page applies the plan with the owner's own
   session through the host's capability API; no route here writes a Bot's spec.
@@ -120,13 +123,17 @@ async def put_policy(request: web.Request, ctx: Any) -> web.Response:
         return web.json_response({"error": "invalid JSON"}, status=400)
     policy = Policy.from_dict(body)
     svc = _svc()
-    before = svc.store.policy().to_dict()
+    old = svc.store.policy()
+    if policy.uses_yolo() and not old.uses_yolo() and not (isinstance(body, dict) and body.get("confirm_yolo") is True):
+        # Turning YOLO on for assignments needs the page's in-place confirm.
+        return web.json_response({"error": "turning on YOLO for assignments needs confirmation",
+                                  "code": "confirm_yolo"}, status=409)
+    before = old.to_dict()
     await asyncio.to_thread(svc.store.save_policy, policy)
     after = policy.to_dict()
     svc._audit("policy", "updated", by="owner", allow=json.dumps(after["allow"]),
                max_turns=after["max_turns_per_context"], orchestrate=json.dumps(after["orchestrate"]),
-               changed=",".join(k for k in ("allow", "max_turns_per_context", "orchestrate", "scope")
-                                if before.get(k) != after.get(k)))
+               changed=",".join(k for k in after if before.get(k) != after.get(k)))
     return web.json_response(policy.to_dict())
 
 
@@ -158,6 +165,9 @@ def register_routes(ctx: Any) -> list[Route]:
         Route("GET", "/session-bot", get_session_bot),
         Route("GET", "/bot/{slug}", get_bot_view),
         Route("POST", "/tasks/{task_id}/cancel", post_cancel_task),
+        Route("GET", "/chief-of-staff", get_chief_of_staff),
+        Route("POST", "/inbox/{item_id}", post_inbox_item),
+        Route("POST", "/assignments/{asg_id}", post_assignment),
     ]
 
 
@@ -346,6 +356,7 @@ def _bot_view(slug: str, policy: dict) -> Optional[dict]:
         "asked_by": sorted(a for a in ids if slug in allow.get(a, [])),
         "rows": rows[-400:],
         "tasks": _svc().list_tasks("", bot=slug, as_owner=True, limit=50),
+        "assigned_to_me": [_asg_view(a) for a in _svc().assignments(target=slug, limit=20)],
         "transport": view["transport"], "version": view["version"], "max_turns": policy["max_turns_per_context"],
     }
 
@@ -377,3 +388,108 @@ async def post_cancel_task(request: web.Request, ctx: Any) -> web.Response:
         status = 404 if err.code == -32001 else 409
         return web.json_response({"error": err.message, "code": err.reason or "task_not_found"}, status=status)
     return web.json_response(task)
+
+
+# ---------------------------------------------------------------- Chief of Staff (0.6)
+
+_COS_RE = __import__("re").compile(r"chief[\s_-]*of[\s_-]*staff", __import__("re").IGNORECASE)
+
+
+def suggest_chief_of_staff(bots: list, audit_rows: list) -> str:
+    """A roster Bot to offer as Chief of Staff, never applied without the owner's click.
+
+    First a Bot whose name or description says "chief of staff"; else the Bot that started
+    the most orchestrations in the recent audit (the one already coordinating); else none.
+    """
+    for b in bots:
+        if _COS_RE.search(f"{b.get('name', '')} {b.get('description', '')} {b.get('id', '')}"):
+            return b["id"]
+    ids = {b["id"] for b in bots}
+    counts: dict = {}
+    for r in audit_rows:
+        if r.get("op") == "orchestrate" and r.get("outcome") == "started" and r.get("caller") in ids:
+            counts[r["caller"]] = counts.get(r["caller"], 0) + 1
+    return max(sorted(counts), key=lambda k: counts[k]) if counts else ""
+
+
+def _asg_view(a: dict) -> dict:
+    from . import cos
+
+    return {**cos.public_assignment(a), "age_secs": cos.age_secs(a)}
+
+
+def _cos_view() -> dict:
+    svc = _svc()
+    svc.sweep_assignments()
+    policy = svc.store.policy()
+    bots = _all_bots()
+    for b in bots:
+        try:
+            agent = hooks._cfg().agents.get(b["agent"])
+            b["description"] = str(getattr(agent, "description", "") or "")[:200]
+        except Exception:  # noqa: BLE001
+            b["description"] = ""
+    rows = _audit_tail()
+    asgs = svc.assignments(limit=100)
+    return {
+        "policy": policy.to_dict(),
+        "bots": [{"id": b["id"], "name": b["name"], "chat": b["chat"]} for b in bots],
+        "suggested": "" if policy.chief_of_staff else suggest_chief_of_staff(bots, rows),
+        "ceiling": svc.mode_ceiling(),
+        "rollcalls": svc.rollcalls(),
+        "inbox": svc.inbox_items(),
+        "assignments": [_asg_view(a) for a in asgs],
+        "unread": sum(1 for a in asgs if a.get("unread")),
+        "schedule_state": svc.cos.state(),
+    }
+
+
+async def get_chief_of_staff(request: web.Request, ctx: Any) -> web.Response:
+    denied = await _owner_only(request, ctx, "a2a.cos")
+    if denied is not None:
+        return denied
+    return web.json_response(await asyncio.to_thread(_cos_view))
+
+
+async def _json_body(request: web.Request) -> dict:
+    if (request.content_length or 0) > _MAX_BODY:
+        return {}
+    try:
+        body = json.loads(await request.read() or b"{}")
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _err_response(err: Any) -> web.Response:
+    status = 404 if err.code == -32001 else 409 if err.code == -32002 else 400 if err.code == -32602 else 403
+    return web.json_response({"error": err.message, "code": err.reason or "refused"}, status=status)
+
+
+async def post_inbox_item(request: web.Request, ctx: Any) -> web.Response:
+    denied = await _owner_only(request, ctx, "a2a.inbox")
+    if denied is not None:
+        return denied
+    from .core import A2AError
+
+    body = await _json_body(request)
+    try:
+        item = _svc().inbox_action(request.match_info.get("item_id", ""), str(body.get("action") or ""))
+    except A2AError as err:
+        return _err_response(err)
+    return web.json_response(item)
+
+
+async def post_assignment(request: web.Request, ctx: Any) -> web.Response:
+    denied = await _owner_only(request, ctx, "a2a.assignment")
+    if denied is not None:
+        return denied
+    from .core import A2AError
+
+    body = await _json_body(request)
+    edits = body.get("edits") if isinstance(body.get("edits"), dict) else None
+    try:
+        asg = _svc().owner_assignment(request.match_info.get("asg_id", ""), str(body.get("action") or ""), edits)
+    except A2AError as err:
+        return _err_response(err)
+    return web.json_response(_asg_view(asg))

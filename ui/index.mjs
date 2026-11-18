@@ -12,6 +12,7 @@ import Activity from './views/activity.mjs'
 import Confirm from './views/confirm.mjs'
 import Health from './views/health.mjs'
 import Limits from './views/limits.mjs'
+import ChiefOfStaff from './views/cos.mjs'
 import Setup, { setupState } from './views/setup.mjs'
 import { TabList, TabPanel, tabFromUrl, writeTab } from './views/tabs.mjs'
 import { removeAgent } from './lib/matrix.mjs'
@@ -184,7 +185,7 @@ export default function A2APage() {
 
   const saveBar = dirty || (policyErr && draft) ? h('div', { className: 'a2a-savebar', role: 'region', 'aria-label': 'Unsaved policy changes' },
     policyErr && draft ? h(ErrorBox, { title: 'Save refused', error: policyErr }) : null,
-    h('p', null, h(Icon, { name: 'Info', size: 14 }), ' Unsaved changes to who may ask whom or limits.'),
+    h('p', null, h(Icon, { name: 'Info', size: 14 }), ' Unsaved changes to the policy.'),
     h('div', { className: 'a2a-row-gap' },
       h(Button, { onClick: () => { setDraft(saved); setPolicyErr(null) }, disabled: saving }, 'Discard'),
       h(Button, { kind: 'primary', icon: 'Check', busy: saving, onClick: save, disabled: !dirty }, 'Save policy'))) : null
@@ -223,6 +224,8 @@ export default function A2APage() {
     h(TabPanel, { id: 'limits', tab },
       draft ? h(Limits, { policy: draft, onChange: setDraft, allBots: Math.min(16, Math.max(1, bots.length - 1)) }) : h(Skeleton, { rows: 3, label: 'Loading limits' }),
       saveBar),
+    h(TabPanel, { id: 'cos', tab },
+      h(ChiefOfStaff, { client, draft, setDraft, saved, name, saveBar })),
     h(TabPanel, { id: 'health', tab },
       setup ? h(Health, { setup, grants, onRepair: repair, onOpenBot: openBot })
         : setupErr ? null : h(Skeleton, { rows: 3, label: 'Checking each Bot' })),

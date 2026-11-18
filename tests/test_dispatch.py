@@ -400,3 +400,24 @@ def test_refused_send_task_and_old_stuck_tasks_end_failed(tmp_path):
     assert hooks.close_stale_deliveries(store) == 1
     assert store.load_task("t-stuck")["status"]["state"] == "TASK_STATE_FAILED"
     assert hooks.close_stale_deliveries(store) == 0
+
+
+def test_mcp_escalate_inbox_and_update_round_trip(tmp_path, monkeypatch):
+    svc = _service(tmp_path, [])
+    svc.store.save_policy(Policy.from_dict({"allow": {"assistant": ["writer"]}, "chief_of_staff": "assistant",
+                                            "cos_can_assign": True, "assign_mode_default": "normal"}))
+    out = _call_with_dispatcher(svc, mcp_server.tool_escalate, {"title": "Need a decision", "why": "w", "ask": "a"},
+                                "worker-of-writer", monkeypatch)
+    assert out.startswith("Escalated")
+    out = _call_with_dispatcher(svc, mcp_server.tool_inbox, {}, "dashboard:member-assistant.memory-x", monkeypatch)
+    assert "Need a decision" in out and "<<<PEER" in out
+    out = _call_with_dispatcher(svc, mcp_server.tool_assign, {"agent": "writer", "title": "t", "brief": "b"},
+                                "dashboard:member-assistant.memory-x", monkeypatch)
+    assert "waiting for your owner's approval" in out
+    asg = svc.assignments()[0]["id"]
+    out = _call_with_dispatcher(svc, mcp_server.tool_update, {"task_id": asg, "status": "working"},
+                                "dashboard:member-assistant.memory-x", monkeypatch)
+    assert out.startswith("Error")  # not the assignee
+    out = _call_with_dispatcher(svc, mcp_server.tool_cancel, {"task_id": asg}, "dashboard:member-assistant.memory-x",
+                                monkeypatch)
+    assert "cannot stop a turn" in out

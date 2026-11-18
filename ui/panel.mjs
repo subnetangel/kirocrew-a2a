@@ -13,6 +13,7 @@ import { Button, Empty, ErrorBox, Icon, Pill, Skeleton, h, plural, usePersisted,
 import Activity from './views/activity.mjs'
 import Confirm from './views/confirm.mjs'
 import { autoHeal, undoHeal } from './lib/heal.mjs'
+import { STATUS_TONE, STATUS_WORD, ageText } from './lib/cos.mjs'
 
 const POLL_MS = 15000
 const useAppInfo = typeof SDK.useAppInfo === 'function' ? SDK.useAppInfo : () => ({ active: true })
@@ -151,6 +152,14 @@ export default function A2APanel() {
       h('strong', null, 'Open tasks'),
       cancelNote ? h('p', { className: 'a2a-faint', role: 'status' }, cancelNote) : null,
       h(Tasks, { tasks: view.tasks, onCancel: cancel, name })) : null,
+    view ? h('section', { className: 'a2a-side-card', 'aria-label': 'Assigned to me' },
+      h('strong', null, 'Assigned to me'),
+      (view.assigned_to_me || []).length ? h('ul', { className: 'a2a-asgs' }, view.assigned_to_me.map(a => h('li', { key: a.id, className: 'a2a-asg' },
+        h('div', { className: 'a2a-asg-head' }, h(Pill, { tone: STATUS_TONE[a.status] || 'info' }, STATUS_WORD[a.status] || a.status),
+          h('span', { className: 'a2a-faint' }, `from ${name(a.by)} · ${ageText(a.age_secs)}`)),
+        h('div', { className: 'a2a-peer' }, String(a.title || '')),
+        a.last_note ? h('div', { className: 'a2a-peer' }, String(a.last_note)) : null)))
+        : h('p', { className: 'a2a-faint' }, 'No assignments.')) : null,
     view ? h('section', { className: 'a2a-side-card', 'aria-label': 'Conversations' },
       h('strong', null, `Conversations (${plural(items.length, 'item')})`),
       h(Activity, { items: groupRows(view.rows), loading: false, error: null, onRetry: load, bots: view.bots, client, name,

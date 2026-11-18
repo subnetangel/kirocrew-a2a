@@ -307,6 +307,39 @@ def reply_text(chunks: list[str], finals: list[str]) -> str:
     return "".join(finals) if any(f.strip() for f in finals) else "".join(chunks)
 
 
+def mode_permitted(mode: str) -> bool:
+    """The host's approval ceiling for *mode*, read at decision time.
+
+    ``trust_reads`` and ``trust`` go through ``approval_mode_policy.session_mode_permitted``;
+    ``yolo`` through ``safety_override_grant.yolo_policy_permits``. Any failure to read the
+    ceiling answers False, so an assignment falls back to ``normal`` (owner approval).
+    """
+    if mode == "normal":
+        return True
+    try:
+        if mode == "yolo":
+            from kiro_crew.safety_override_grant import yolo_policy_permits
+
+            return bool(yolo_policy_permits())
+        if mode in ("trust_reads", "trust"):
+            from kiro_crew.approval_mode_policy import session_mode_permitted
+
+            return bool(session_mode_permitted(mode))
+    except Exception:  # noqa: BLE001 -- unreadable ceiling fails closed
+        logger.info("a2a: approval ceiling unreadable for %s", mode, exc_info=True)
+    return False
+
+
+def roster_slugs() -> list:
+    try:
+        from .routes import _all_bots
+
+        return [b["id"] for b in _all_bots()]
+    except Exception:  # noqa: BLE001
+        logger.debug("a2a: roster unreadable", exc_info=True)
+        return []
+
+
 def _gateway(ctx: Any) -> Gateway:
     untrusted = getattr(ctx, "untrusted", None)
 
@@ -319,6 +352,8 @@ def _gateway(ctx: Any) -> Gateway:
     return Gateway(
         resolve_target=bot_name,
         is_roster=is_roster_slug,
+        roster=roster_slugs,
+        mode_permitted=mode_permitted,
         deliver=lambda slug, text, banner="": _deliver(ctx, slug, text, banner),
         scrub=scrub,
         neutralize=(untrusted.neutralize if untrusted else (lambda s: s)),
@@ -395,8 +430,31 @@ async def _handle_entry(svc: A2AService, path: Path) -> None:
             out = await svc.orchestrate(caller, label, agents, str(entry.get("message") or ""))
             _write_result(store, rid, {"ok": True, "orchestration": out})
         elif op == "cancel":
-            task = svc.cancel_task(caller, str(entry.get("task_id") or ""))
-            _write_result(store, rid, {"ok": True, "task": task})
+            task_id = str(entry.get("task_id") or "")
+            if task_id.startswith("asg_"):
+                asg = svc.cancel_assignment(caller, task_id)
+                _write_result(store, rid, {"ok": True, "assignment": asg})
+            else:
+                task = svc.cancel_task(caller, task_id)
+                _write_result(store, rid, {"ok": True, "task": task})
+        elif op == "rollcall":
+            out = await svc.rollcall(caller, label, str(entry.get("question") or ""))
+            _write_result(store, rid, {"ok": True, "rollcall": out})
+        elif op == "escalate":
+            out = svc.escalate(caller, str(entry.get("title") or ""), str(entry.get("why") or ""),
+                               str(entry.get("ask") or ""))
+            _write_result(store, rid, {"ok": True, "escalation": out})
+        elif op == "inbox":
+            _write_result(store, rid, {"ok": True, "inbox": svc.inbox(caller)})
+        elif op == "assign":
+            asg = await svc.assign(caller, label, str(entry.get("agent") or ""), str(entry.get("title") or ""),
+                                   str(entry.get("brief") or ""), str(entry.get("done_when") or ""),
+                                   str(entry.get("kind") or "change"))
+            _write_result(store, rid, {"ok": True, "assignment": asg})
+        elif op == "update":
+            asg = svc.update_assignment(caller, str(entry.get("task_id") or ""), str(entry.get("status") or ""),
+                                        str(entry.get("note") or ""))
+            _write_result(store, rid, {"ok": True, "assignment": asg})
         elif op == "tasks":
             tasks = svc.list_tasks(caller, str(entry.get("context_id") or ""), "", int(entry.get("limit") or 20))
             _write_result(store, rid, {"ok": True, "tasks": tasks})
@@ -519,12 +577,19 @@ def _sweep_results(store: Store) -> None:
 async def _dispatch_loop(svc: A2AService) -> None:
     inflight: set[asyncio.Task] = set()
     last_sweep = 0.0
+    last_tick = 0.0
     while True:
         try:
             for path in sorted(svc.store.outbox.glob("*.json")):
                 task = asyncio.create_task(_handle_entry(svc, path))
                 inflight.add(task)
                 task.add_done_callback(inflight.discard)
+            if time.time() - last_tick > 30:
+                last_tick = time.time()
+                # Stale assignments and the daily roll call (owner toggle, default off).
+                tick = asyncio.create_task(svc.scheduled_tick())
+                inflight.add(tick)
+                tick.add_done_callback(inflight.discard)
             if time.time() - last_sweep > 60:
                 await asyncio.to_thread(_sweep_results, svc.store)
                 last_sweep = time.time()

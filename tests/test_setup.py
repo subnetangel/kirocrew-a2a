@@ -80,9 +80,9 @@ def test_old_tool_list_gets_only_the_missing_tools():
     old = [f"@a2a:a2a/{n}" for n in ("a2a_list", "a2a_discover", "a2a_call", "a2a_history")]
     h = setup.bot_health(_spec(allowed=old), STABLE, _exists("/usr/bin/python3", SCRIPT))
     assert h["tools_missing"] == ["a2a_orchestrate", "a2a_result"] and not h["ok"]
-    assert h["tools_newer"] == ["a2a_cancel", "a2a_tasks"]
+    assert h["tools_newer"] == ["a2a_cancel", "a2a_tasks", "a2a_rollcall", "a2a_escalate", "a2a_inbox", "a2a_assign", "a2a_update"]
     ids = [o["id"] for o in setup.repair_ops(h, STABLE)]
-    assert ids == [f"@a2a:a2a/{n}" for n in ("a2a_orchestrate", "a2a_result", "a2a_cancel", "a2a_tasks")] + ["@a2a:a2a"]
+    assert ids == [f"@a2a:a2a/{n}" for n in ("a2a_orchestrate", "a2a_result", *setup.TOOL_NAMES[6:])] + ["@a2a:a2a"]
 
 
 def test_label_off_or_other_copy_is_repaired():
@@ -391,7 +391,7 @@ OLD_6 = [f"@a2a:a2a/{n}" for n in setup.CORE_TOOLS]
 def test_newer_tools_missing_is_update_available_not_needs_repair():
     h = setup.bot_health(_spec(allowed=OLD_6), STABLE, _exists("/usr/bin/python3", SCRIPT))
     assert h["ok"] and h["update_available"] and h["problems"] == []
-    assert h["tools_newer"] == ["a2a_cancel", "a2a_tasks"]
+    assert h["tools_newer"] == ["a2a_cancel", "a2a_tasks", "a2a_rollcall", "a2a_escalate", "a2a_inbox", "a2a_assign", "a2a_update"]
 
 
 def test_server_level_entry_counts_as_every_tool():
@@ -403,7 +403,7 @@ def test_heal_only_adds_newer_a2a_tools_to_a_correct_mount():
     h = setup.bot_health(_spec(allowed=OLD_6), STABLE, _exists("/usr/bin/python3", SCRIPT))
     ops = setup.heal_ops(h)
     assert {o["section"] for o in ops} == {"allowedTools"}
-    assert [o["id"] for o in ops] == ["@a2a:a2a/a2a_cancel", "@a2a:a2a/a2a_tasks", "@a2a:a2a"]
+    assert [o["id"] for o in ops] == [f"@a2a:a2a/{n}" for n in setup.TOOL_NAMES[6:]] + ["@a2a:a2a"]
     assert all(o["id"].startswith("@a2a:a2a") and o["action"] == "set" for o in ops)
 
 

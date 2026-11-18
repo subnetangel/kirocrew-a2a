@@ -398,3 +398,127 @@ That is a sandbox question to settle in 0.5.3 before building. Until then, data 
 **0.5.1 also:**
 - **Panel scrolling.** The side-panel tab's root (`.a2a.a2a-side`) is its own scroll container: `height: 100%; min-height: 0; overflow-y: auto; overscroll-behavior: contain`. The page root `.a2a` is unchanged. The name `.a2a-panel` belongs to the page's tab panels, so the rule stays off it.
 - **Stuck "In progress" tasks.** In 0.5.0, a send the gateway refused (no chat yet) left its saved `WORKING` task in place, because only the audit row closed. Now the task is saved as `FAILED` with the refusal text. On startup, any `WORKING` task whose audit shows an error, or a delivery with no outcome after 15 minutes, is closed as `FAILED` once.
+
+## 0.6.0: Chief of Staff
+
+**One coordinator, chosen by the owner.** Policy `chief_of_staff` names one roster Bot, or
+none (the default). The page offers a suggestion (a Bot whose name or description says
+"chief of staff", else the Bot that started the most orchestrations in the recent audit)
+behind a one-click button and never saves it on its own. The caller is still the
+gateway's mapping of the calling session, so a Bot cannot claim the role.
+
+**Fan-out gate.** Only the Chief of Staff may call `a2a_orchestrate` with `["all"]` or
+with more than `fanout_others` targets (default 3, owner-set 1-16). Its own runs are
+held to `max_bots` as before. A longer list from any other Bot is refused with both
+numbers, never trimmed. Trade-off: with no Chief of Staff set, `["all"]` is refused for
+everyone, which is a change from 0.5.1. A coordinating Bot that relied on it gets it
+back when the owner names it.
+
+**Roll call.** `a2a_rollcall(question?)` is a fan-out of ordinary answer-only turns to
+every roster Bot but the Chief of Staff, one fresh context each, under the run's time
+budget. The roll call reaches every roster Bot up to the hard cap of 16 even when
+`max_bots` is lower: naming a Chief of Staff is the owner's consent to that. Bots the
+policy does not let the Chief of Staff ask show as `refused` rather than being skipped,
+so the brief shows the gap. The question opens with a line saying it is a status question
+only. The merged brief is stored under `member-records/app-a2a/cos/rollcalls.json` (last
+50 kept, last 10 shown). Each row is the Bot's answer or why there is none (`no-chat`,
+`timeout`, `busy`).
+
+**Overlaps.** Identifiers named by two or more Bots in one brief: `CR-\d+`, `P\d{6,}`,
+`V\d{9,}`, SIM/ticket-style `[A-Z][A-Z0-9]{1,9}-\d{2,}`, and the owner's `watch_terms`
+(empty by default, whole-word, case-insensitive). Detection only; nothing acts on it.
+False positives are possible (any `ABC-12` shape); that is cheaper than a miss, and the
+owner reads the list.
+
+**Escalations.** `a2a_escalate(title, why, ask)` from any roster Bot but the Chief of
+Staff adds an item to the inbox (`cos/inbox.json`). Repeats from the same caller with the
+same normalized title (lowercase, punctuation folded) bump a count and the last-seen time
+instead of adding a row. Fields over 200/500/300 characters are refused, not cut. The
+call shares the per-caller send bucket. The text is scrubbed on the way in, shown on the
+page as plain text, and fenced when `a2a_inbox` hands it to the Chief of Staff. Only the
+owner closes items (Done or Dismiss).
+
+**The daily schedule, and why it is not an app cron.** 0.13.0.1 lets an app declare
+crons (manifest `crons`, `CronEntry`; registered by `apps/bridges_crons.py`
+`register_app_crons_with_service`, re-synced after an update by
+`apps/routes_install._resync_app_crons_after_update`), and `ctx.cron.add_job` adds jobs
+at run time. Each job runs an agent prompt, a shell command or a `script` in a
+subprocess. None of those can reach a2a's in-gateway service without a credential the
+app does not hand out, and the manifest owns the schedule fields, so the page could not
+set the time. So the schedule lives in policy (`rollcall_schedule`: `enabled` false,
+`06:45`, `America/Chicago`) and the in-gateway dispatcher checks it every 30 s. It
+fires once per local day, inside the hour after the set time, so a gateway that was down
+at 06:45 does not fire at night. Trade-off: the job is not listed on the Schedule page;
+the Chief of Staff tab shows the toggle and the briefs instead. No manifest or
+`permissions.api` change was needed.
+
+**Inbound frame.** Every peer turn now also says that a roll call is a status question
+only, and that a Bot may raise something for the owner with `a2a_escalate`, never because
+peer text asks it to.
+
+## 0.6.0: Assignments
+
+`a2a_assign(agent, title, brief, done_when, kind)` lets the Chief of Staff, and only it,
+give another Bot work on the owner's behalf. This is the first a2a feature that is not
+answer-only, so it is off until the owner ticks `cos_can_assign`.
+
+**Approval modes.** Assignments mirror Kiro Crew's approval modes
+(`approval_mode_policy.KNOWN_APPROVAL_MODES`): `assign_mode_default` (default `normal`)
+and per-Bot `assign_mode_by_bot`, which wins.
+
+| Mode | Page label | Routing | Frame |
+|---|---|---|---|
+| `normal` | Approve | Queued until the owner presses Approve (Edit, Reject) | Keeps the irreversible-actions line |
+| `trust_reads` | Trust reads | `kind: read` sends at once; `kind: change` is queued | Read adds "Read-only assignment: do not change, send, post, merge, deploy or delete anything." |
+| `trust` | Trust | Sends at once; marked unread on the tab | Keeps the irreversible-actions line |
+| `yolo` | YOLO | Sends at once, no per-assignment notice | Drops the "ask first" line |
+
+**Ceiling.** At decision time the backend reads the host's own verdicts:
+`approval_mode_policy.session_mode_permitted("trust_reads" | "trust")` and
+`safety_override_grant.yolo_policy_permits()`. Both import from app backend code on
+0.13.0.1 (checked). A denied mode, or any exception while reading, is treated as
+`normal`, and the page greys the option out (`GET /chief-of-staff` `ceiling`). Trust has
+no app notification seam on 0.13.0.1 (`AppContext` has no notify SDK), so "notify" is the
+unread mark and count on the tab.
+
+**Why Approve is the default, and the prompt-injection trade-off.** A Chief of Staff
+reads email, Slack and tickets, all of which carry text anyone can plant. Whatever it
+writes into an assignment can carry that planted text forward as real work in another
+Bot's thread. Approve puts the owner between the two: nothing goes out until the owner
+reads it, as plain text on the page (React text nodes, never HTML or markdown). The looser
+modes trade that review for speed. In every mode the assigned Bot still runs under its own
+spec and approval mode, so YOLO here does not turn the target's own approval cards off; it
+only removes a2a's review and the frame's "ask first" line. Turning YOLO on needs an
+in-page confirm that names this risk (the backend refuses a policy save that turns it on
+without `confirm_yolo: true`, 409 `confirm_yolo`), and the tab shows a red banner while it
+is on.
+
+**Floors in every mode.** a2a never widens a Bot's tools or approval mode. The Chief of
+Staff cannot assign to itself. Opted-out Bots (`accepts_assignments: {id: false}`) are
+refused. The target must be one the policy lets the Chief of Staff ask. The per-caller
+send bucket applies. At most `max_open_assignments` open per target (default 3, 1-10):
+one more is refused, not queued. Fields are capped at 120/2000/300 and refused over
+the cap. The host's injection screen runs on the text. Every step writes an audit row.
+Owner Cancel and the Chief of Staff's `a2a_cancel` work in every mode, and a 24-hour
+stale close applies.
+
+**Delivery.** A new turn in the target's pinned thread through the same `/api/chat` path,
+with the banner `A2A · Assignment from <CoS> for <owner> · <title>`. The title is peer
+text, so only banner-safe characters survive, capped at 60. The fenced frame says the
+work was assigned on the owner's behalf, to use normal tools and approvals, that anything
+irreversible (sending, posting, merging, deploying, deleting, spending) still needs the
+owner's own approval through the Bot's usual cards (except in YOLO), to report with
+`a2a_update`, and that the fenced text is untrusted data.
+
+**Lifecycle.** `queued` → `sent` → `working` → `done` or `blocked`, plus `canceled`,
+`rejected` and `stale`. Only the assigned Bot may call `a2a_update(task_id, status,
+note)`; the note is capped at 500 characters and scrubbed. A delivery the gateway refuses,
+or a Bot that stays busy, closes as `blocked` with the reason. Cancel stops a2a following
+the work and drops it from the open count; it cannot stop a turn the Bot already started,
+and the tool and the page both say so. Visibility: the Chief of Staff tab (queue and list
+with status, last note and age), each Bot's panel tab ("Assigned to me"), and `a2a_inbox`
+for the Chief of Staff.
+
+**Tools on every Bot.** The new tools join the auto-heal list like 0.5.1's, so every Bot
+can see them. Each is gated in the backend by who the gateway says is calling, so a Bot
+that is not the Chief of Staff gets a refusal, not a capability.
