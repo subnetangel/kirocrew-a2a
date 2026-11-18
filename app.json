@@ -1,8 +1,8 @@
 {
   "name": "a2a",
-  "version": "0.4.5",
+  "version": "0.5.1",
   "displayName": "A2A: Bots ask each other",
-  "description": "Lets one of your Bots ask another Bot a question and get that Bot's own answer, from its own memory and tools, in its own thread. It speaks A2A v1.0 JSON-RPC on the gateway's existing authenticated routes and opens no port of its own. You decide which Bot may ask which; everything else is refused, answers are answer-only, and every exchange is logged.",
+  "description": "Lets one of your Bots ask another Bot a question and get that Bot's own answer, from its own memory and tools, in its own thread. Speaks the A2A v1.0 JSON-RPC protocol on the gateway's existing authenticated routes and opens no port of its own. You decide which Bot may ask which; everything else is refused. Answer-only, at most 5 turns per conversation by default (up to 10), and every exchange is logged.",
   "author": "subnetangel",
   "license": "MIT",
   "minKiroCrewVersion": "0.13.0",
@@ -22,7 +22,8 @@
     "Ask several Bots at once (a2a_orchestrate) inside an owner-set Bot and time budget",
     "One press turns A2A on for every Bot, after showing every change",
     "Health per Bot, with Repair: a mount that survives Kiro Crew upgrades",
-    "Live activity feed by conversation and orchestration run, refusals marked"
+    "Live activity feed by conversation and orchestration run, refusals marked",
+    "An A2A tab in each Bot's chat side panel: its health, pairs, conversations and open tasks"
   ],
   "defaultEnabled": false,
   "platform": {
@@ -73,6 +74,18 @@
         "route": "/a2a",
         "label": "A2A",
         "iconUrl": "nav-icon.png"
+      }
+    ]
+  },
+  "contributes": {
+    "panelTabs": [
+      {
+        "id": "a2a",
+        "title": "A2A",
+        "menuLabel": "A2A",
+        "menuDescription": "This Bot's A2A view: health, who it may ask, its conversations and open tasks",
+        "icon": "Network",
+        "entry": "panel.mjs"
       }
     ]
   },

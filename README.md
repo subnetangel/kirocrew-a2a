@@ -52,24 +52,54 @@ and ships a stdio MCP server. Kiro Crew refuses third-party executable code unti
 you trust the app: when you enable it, accept the trust dialog (it trusts this app
 only). Without that, you will see `app_execution_denied`.
 
-1. **Install it** from a terminal on the machine that runs your gateway:
-   ```bash
-   kirocrew app install https://github.com/subnetangel/kirocrew-a2a
-   ```
-   Or clone the repository and add the folder under **Apps > Discover > Sources**
-   (the gear in the Discover header), which installs a local directory. Once the
-   app is in the Kiro Crew App Store, **Discover** lists it directly.
-2. **Enable it** on the app's page. Accept the trust dialog and the consent to
-   send messages into your Bots' chats (`sessionApproval` + `memberThreads`).
-   Without that consent every send is refused.
-3. **Approve the grants** the app page lists (`/api/members`, `bots: read`), and
-   tick the Bots under "Bots this app can reach", so a2a can wait for a busy Bot
-   instead of queueing.
-4. **Give each Bot the tools.** Add the `a2a` MCP server to each Bot's worker
-   (one card per Bot), or press **Turn on A2A for all my Bots** on the A2A page,
-   which lists every change before it applies anything.
+### Install from GitHub with one-click updates
 
-To update: `kirocrew app update a2a`, or **Update** on the app's page.
+This repository is also a Kiro Crew app registry (`app-registry.json` on the
+`release` branch). Needs Kiro Crew 0.13.0.1 or newer.
+
+1. **Add the registry.** In **Discover**, open **Sources** (top right), then
+   **External Registries > Add Registry**:
+   - **Display Name:** `subnetangel-a2a`
+   - **Repo:** `https://github.com/subnetangel/kirocrew-a2a` (no `.git`, no trailing slash)
+   - **Branch:** `release`
+
+   Save, then click **Sync registry apps**. Use the same name and URL on every
+   machine: the update path is tied to them.
+2. **Install.** In Discover, find **A2A: Bots ask each other** and click
+   **Install**. Accept the trust dialog ("Trust 'A2A: Bots ask each other' to run
+   its own code?"); it trusts this repository only.
+3. **Enable it** on the app's page. Accept the consent to send messages into your
+   Bots' chats (`sessionApproval` + `memberThreads`). Without that consent every
+   send is refused.
+4. **Tick your Bots** under "Bots this app can reach" and approve the grants the
+   page lists (`/api/members`, `bots: read`), so a2a can wait for a busy Bot
+   instead of queueing.
+5. **Give each Bot the tools.** On the A2A page, press **Turn on A2A for all my
+   Bots**. It lists every change before it applies anything.
+
+**Updates:** click **Sync registry apps** in Sources, then **Update** on the app's
+page. Discover and the bell show when a new version is published; nothing
+updates on its own.
+
+### Alternative: install from a terminal
+
+```bash
+kirocrew app install https://github.com/subnetangel/kirocrew-a2a
+```
+
+Then do steps 3 to 5 above. An install made this way does not get one-click
+updates: to update, `git pull` the `release` branch into a local clone and run
+`kirocrew app update a2a --source <that clone>`. You can also clone the
+repository and add the folder under **Discover > Sources** as a local directory,
+with the same update steps. Once the app is in the Kiro Crew App Store,
+**Discover** lists it directly.
+
+## Releasing
+
+Releases are published on the `release` branch, which is the default branch.
+Bump `version` in `app.json` and in `app-registry.json` in the same commit on
+`release`; the two must match. If the registry version runs ahead of `app.json`,
+the store keeps offering an update that never clears.
 
 ## Tools a Bot gets
 

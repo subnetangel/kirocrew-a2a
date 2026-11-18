@@ -15,12 +15,15 @@ import Limits from './views/limits.mjs'
 import Setup, { setupState } from './views/setup.mjs'
 import { TabList, TabPanel, tabFromUrl, writeTab } from './views/tabs.mjs'
 import { removeAgent } from './lib/matrix.mjs'
+import { autoHeal, undoHeal } from './lib/heal.mjs'
 
 const ICON = new URL('./icon.png', import.meta.url).href
 const POLL_MS = 10000
 // The open review dialog outlives a remount of this page: the review it shows belongs to
 // one button press (runId), so a host re-render cannot restart it.
 let openDialog = null
+// Auto-heal runs once per page load (a remount re-uses the result).
+let healRun = null
 const newRunId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 
 function readFilter() {
@@ -91,6 +94,7 @@ export default function A2APage() {
   const [tab, setTabState] = useState(() => tabFromUrl(lastTab))
   const setTab = t => { setTabState(t); setLastTab(t); writeTab(t) }
   const [removing, setRemoving] = useState(false)
+  const [healed, setHealed] = useState(null)
   const [filter, setFilterState] = useState(readFilter)
   const [seen, setSeen] = usePersisted('seen', { at: '', keys: [] })
   const [arrived, setArrived] = useState(() => new Set())
@@ -107,6 +111,18 @@ export default function A2APage() {
     try { const p = await client.get(`${API}/policy`); setSaved(p); setDraft(p); setPolicyErr(null) } catch (e) { setPolicyErr(e) }
   }, [client])
   useEffect(() => { loadSetup(); loadPolicy() }, [loadSetup, loadPolicy])
+  useEffect(() => {
+    if (!setup || !saved) return
+    if (!healRun) healRun = autoHeal(client, setup, saved)
+    let live = true
+    healRun.then(r => { if (live && r.healed.length) { setHealed(r); loadSetup() } })
+    return () => { live = false }
+  }, [setup && setup.version, saved && saved.auto_update_tools])
+  const undo = async () => {
+    const left = await undoHeal(client, healed.healed)
+    setHealed(left.length ? { ...healed, undoFailed: left } : null)
+    loadSetup()
+  }
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 30000); return () => clearInterval(t) }, [])
 
   const bots = (setup && setup.bots) || []
@@ -188,6 +204,11 @@ export default function A2APage() {
           h('p', null, 'Who may ask whom, how far a conversation may go, and every exchange. A Bot that is asked answers and changes nothing.'))),
       h(Status, { setup, policy: saved, bots, lastSend, now, needRepair, setupErr })),
     setupErr ? h(ErrorBox, { title: 'The a2a backend did not answer', error: setupErr, onRetry: loadSetup }) : null,
+    healed ? h('p', { className: 'a2a-healed', role: 'status' }, h(Icon, { name: 'CircleCheck', size: 14 }),
+      `Updated ${plural(healed.healed.length, 'Bot')} to the ${setup ? setup.version : '0.5'} tool list.`,
+      healed.undoFailed ? h('span', { className: 'a2a-warn-text' }, ` Undo failed for ${healed.undoFailed.join(', ')}.`) : null,
+      h(Button, { kind: 'quiet', className: 'a2a-btn-sm', icon: 'RotateCcw', onClick: undo }, 'Undo'),
+      h(Button, { kind: 'quiet', className: 'a2a-btn-sm', onClick: () => setHealed(null) }, 'Dismiss')) : null,
     state && !state.complete ? h(Setup, { state, onStart: startSetup, manual, noChat: setup.no_chat || [], onOpenChat: openBot, pythonOk: setup.python_ok, python: setup.python,
       maxBots: (saved.orchestrate || {}).max_bots || 4, orchAll, setOrchAll }) : null,
     h(TabList, { tab, onSelect: setTab, badges }),

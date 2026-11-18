@@ -4,6 +4,7 @@ rule that owner-only host APIs are only ever called from the owner's page."""
 from __future__ import annotations
 
 import ast
+import json
 import asyncio
 import re
 import sys
@@ -70,16 +71,18 @@ def test_fragile_command_that_still_exists_is_flagged_before_the_upgrade():
 def test_missing_tools_and_mount_build_every_op():
     h = setup.bot_health({"name": "x"}, STABLE, _exists("/usr/bin/python3", SCRIPT))
     ops = setup.repair_ops(h, STABLE)
-    assert [o["section"] for o in ops] == ["mcpServers", "tools"] + ["allowedTools"] * len(setup.TOOL_NAMES)
-    assert {o["id"] for o in ops if o["section"] == "allowedTools"} == set(setup.tool_refs())
+    assert [o["section"] for o in ops] == ["mcpServers", "tools"] + ["allowedTools"] * (len(setup.TOOL_NAMES) + 1)
+    assert {o["id"] for o in ops if o["section"] == "allowedTools"} == set(setup.tool_refs()) | {"@a2a:a2a"}
     assert all(o["action"] == "set" and set(o) == {"section", "id", "action", "value"} for o in ops)
 
 
 def test_old_tool_list_gets_only_the_missing_tools():
     old = [f"@a2a:a2a/{n}" for n in ("a2a_list", "a2a_discover", "a2a_call", "a2a_history")]
     h = setup.bot_health(_spec(allowed=old), STABLE, _exists("/usr/bin/python3", SCRIPT))
-    assert h["tools_missing"] == ["a2a_orchestrate", "a2a_result"]
-    assert [o["id"] for o in setup.repair_ops(h, STABLE)] == ["@a2a:a2a/a2a_orchestrate", "@a2a:a2a/a2a_result"]
+    assert h["tools_missing"] == ["a2a_orchestrate", "a2a_result"] and not h["ok"]
+    assert h["tools_newer"] == ["a2a_cancel", "a2a_tasks"]
+    ids = [o["id"] for o in setup.repair_ops(h, STABLE)]
+    assert ids == [f"@a2a:a2a/{n}" for n in ("a2a_orchestrate", "a2a_result", "a2a_cancel", "a2a_tasks")] + ["@a2a:a2a"]
 
 
 def test_label_off_or_other_copy_is_repaired():
@@ -340,3 +343,89 @@ def test_other_agents_lists_non_roster_names_only():
              "app:other": ["writer"]}
     out = routes.other_agents(allow, {"assistant", "writer"})
     assert out == [{"id": "kirocrew-worker", "pairs": 2}]
+
+
+def test_panel_routes_are_owner_only(monkeypatch):
+    class Req(dict):
+        def __init__(self, app=""):
+            super().__init__()
+            self.match_info = {"slug": "assistant", "task_id": "t1"}
+            self.query = {"key": "dashboard:x"}
+            if app:
+                self["app"] = app
+
+    class Ctx:
+        async def require_owner(self, request, op):
+            from aiohttp import web
+            return web.json_response({"error": "owner"}, status=403)
+
+    async def go():
+        for handler in (routes.get_session_bot, routes.get_bot_view, routes.post_cancel_task):
+            assert (await handler(Req(app="a2a"), Ctx())).status == 403
+            assert (await handler(Req(), Ctx())).status == 403
+    asyncio.run(go())
+
+
+def test_session_bot_only_names_roster_bots(monkeypatch):
+    class Req(dict):
+        query = {"key": "dashboard:member-x"}
+
+    class Ctx:
+        async def require_owner(self, request, op):
+            return None
+
+    monkeypatch.setattr(routes.hooks, "caller_slug_for_session", lambda key: "kirocrew-worker")
+    monkeypatch.setattr(routes, "_all_bots", lambda: [{"id": "assistant"}])
+    out = asyncio.run(routes.get_session_bot(Req(), Ctx()))
+    assert json.loads(out.text) == {"bot": ""}
+    monkeypatch.setattr(routes.hooks, "caller_slug_for_session", lambda key: "assistant")
+    assert json.loads(asyncio.run(routes.get_session_bot(Req(), Ctx())).text) == {"bot": "assistant"}
+
+
+
+# ------------------------------------------------------- 0.5.1 tiers and auto-heal
+
+OLD_6 = [f"@a2a:a2a/{n}" for n in setup.CORE_TOOLS]
+
+
+def test_newer_tools_missing_is_update_available_not_needs_repair():
+    h = setup.bot_health(_spec(allowed=OLD_6), STABLE, _exists("/usr/bin/python3", SCRIPT))
+    assert h["ok"] and h["update_available"] and h["problems"] == []
+    assert h["tools_newer"] == ["a2a_cancel", "a2a_tasks"]
+
+
+def test_server_level_entry_counts_as_every_tool():
+    h = setup.bot_health(_spec(allowed=["@a2a:a2a"]), STABLE, _exists("/usr/bin/python3", SCRIPT))
+    assert h["ok"] and not h["update_available"] and setup.heal_ops(h) == []
+
+
+def test_heal_only_adds_newer_a2a_tools_to_a_correct_mount():
+    h = setup.bot_health(_spec(allowed=OLD_6), STABLE, _exists("/usr/bin/python3", SCRIPT))
+    ops = setup.heal_ops(h)
+    assert {o["section"] for o in ops} == {"allowedTools"}
+    assert [o["id"] for o in ops] == ["@a2a:a2a/a2a_cancel", "@a2a:a2a/a2a_tasks", "@a2a:a2a"]
+    assert all(o["id"].startswith("@a2a:a2a") and o["action"] == "set" for o in ops)
+
+
+def test_heal_never_touches_a_bot_without_the_server_or_with_a_fault():
+    assert setup.heal_ops(setup.bot_health({"name": "x"}, STABLE, _exists("/usr/bin/python3", SCRIPT))) == []
+    fragile = setup.bot_health(_spec(command=FRAGILE, allowed=OLD_6), STABLE, _exists(FRAGILE, SCRIPT))
+    assert not fragile["ok"] and setup.heal_ops(fragile) == []  # that is Repair's job, with a review
+    core_gap = setup.bot_health(_spec(allowed=OLD_6[:4]), STABLE, _exists("/usr/bin/python3", SCRIPT))
+    assert setup.heal_ops(core_gap) == []
+    assert setup.heal_ops(None) == []
+
+
+def test_auto_update_setting_defaults_on_and_round_trips():
+    from backend.core import Policy
+    assert Policy.from_dict({}).auto_update_tools is True
+    assert Policy.from_dict({"auto_update_tools": False}).to_dict()["auto_update_tools"] is False
+
+
+def test_side_panel_root_scrolls_and_the_page_does_not():
+    css = (ROOT / "ui" / "a2a.css").read_text(encoding="utf-8")
+    body = next(b for s, b in _css_rules(css) if s == ".a2a.a2a-side")
+    assert re.search(r"overflow-y\s*:\s*auto", body) and re.search(r"height\s*:\s*100%", body)
+    assert re.search(r"min-height\s*:\s*0", body) and "overscroll-behavior" in body
+    page = next(b for s, b in _css_rules(css) if s == ".a2a")
+    assert "overflow-y" not in page  # the page keeps scrolling with the host

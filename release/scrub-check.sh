@@ -119,5 +119,17 @@ else
   hits=$((hits + 1)); echo "FAIL turn default: core.py=${code_turns}, seed=${seed_turns}, README does not say 'allows ${code_turns} turns by default'"
 fi
 
+# 8. The registry index names this app at the version app.json ships.
+if python3 - <<'EOF'
+import json, sys
+app = json.load(open("app.json"))
+rows = json.load(open("app-registry.json"))
+ok = isinstance(rows, list) and len(rows) == 1 and rows[0].get("name") == app["name"] \
+    and rows[0].get("version") == app["version"]
+sys.exit(0 if ok else 1)
+EOF
+then printf 'ok   %s\n' "app-registry.json matches app.json"
+else hits=$((hits + 1)); echo "FAIL app-registry.json name/version differ from app.json (bump both in one commit)"; fi
+
 echo "== total hits: $hits"
 [ "$hits" -eq 0 ]

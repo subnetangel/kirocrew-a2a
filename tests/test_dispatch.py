@@ -374,3 +374,29 @@ def test_stale_deliveries_are_closed_once_on_startup(tmp_path):
     assert last["task"] == "t-old" and last["outcome"] == "error" and last["reason"] == "stale"
     assert store.read_context("c-old")["turns"] == 0
     assert hooks.close_stale_deliveries(store) == 0  # once
+
+
+def test_refused_send_task_and_old_stuck_tasks_end_failed(tmp_path):
+    from backend import core
+    store = Store(tmp_path)
+    store.ensure()
+    store.save_policy(Policy.from_dict({"allow": {"assistant": ["researcher"]}}))
+
+    async def refuse(slug, text, banner=""):
+        raise core.A2AError(-32050, "Research Bot has no chat yet; ask your owner to open it once")
+
+    svc = A2AService(store, Gateway(resolve_target=BOTS.get, deliver=refuse, scrub=lambda s: s))
+    try:
+        asyncio.run(svc.send("assistant", "Assistant", "researcher", "q"))
+    except core.A2AError:
+        pass
+    states = {t["id"]: t["status"]["state"] for t in store.tasks()}
+    assert list(states.values()) == ["TASK_STATE_FAILED"]  # never left "In progress"
+    # A 0.5.0 leftover: WORKING task file with an error audit row is closed at startup.
+    stuck = core.make_task("t-stuck", "c1", core.STATE_WORKING, "Asking...")
+    store.save_task({**stuck, "_caller": "assistant", "_target": "researcher"})
+    store.audit({"op": "send", "outcome": "delivering", "task": "t-stuck", "context": "c1"})
+    store.audit({"op": "send", "outcome": "error", "task": "t-stuck", "context": "c1", "error": "no chat yet"})
+    assert hooks.close_stale_deliveries(store) == 1
+    assert store.load_task("t-stuck")["status"]["state"] == "TASK_STATE_FAILED"
+    assert hooks.close_stale_deliveries(store) == 0

@@ -74,6 +74,28 @@ def bot_name(slug: str) -> Optional[str]:
         return None
 
 
+def is_roster_bot(name: str, agent: Any) -> bool:
+    """The dashboard's Crewmates rule (``members.is_person_created_crewmate``)."""
+    try:
+        from kiro_crew import members as members_mod
+
+        return bool(members_mod.is_person_created_crewmate(name, agent))
+    except Exception:  # noqa: BLE001 -- unknown is not a Bot
+        return False
+
+
+def is_roster_slug(slug: str) -> bool:
+    """Whether *slug* names one of the owner's own Bots (not mate, a worker or an app agent)."""
+    name = bot_name(slug)
+    if not name:
+        return False
+    try:
+        agent = _cfg().agents.get(name)
+    except Exception:  # noqa: BLE001
+        return False
+    return agent is not None and bool(getattr(agent, "member_id", "")) and is_roster_bot(name, agent)
+
+
 def thread_key(slug: str) -> str:
     name = bot_name(slug)
     if not name:
@@ -296,6 +318,7 @@ def _gateway(ctx: Any) -> Gateway:
 
     return Gateway(
         resolve_target=bot_name,
+        is_roster=is_roster_slug,
         deliver=lambda slug, text, banner="": _deliver(ctx, slug, text, banner),
         scrub=scrub,
         neutralize=(untrusted.neutralize if untrusted else (lambda s: s)),
@@ -371,6 +394,12 @@ async def _handle_entry(svc: A2AService, path: Path) -> None:
             agents = [str(a).strip().lower() for a in agents] if isinstance(agents, list) else []
             out = await svc.orchestrate(caller, label, agents, str(entry.get("message") or ""))
             _write_result(store, rid, {"ok": True, "orchestration": out})
+        elif op == "cancel":
+            task = svc.cancel_task(caller, str(entry.get("task_id") or ""))
+            _write_result(store, rid, {"ok": True, "task": task})
+        elif op == "tasks":
+            tasks = svc.list_tasks(caller, str(entry.get("context_id") or ""), "", int(entry.get("limit") or 20))
+            _write_result(store, rid, {"ok": True, "tasks": tasks})
         elif op == "history":
             rows = svc.history(caller, str(entry.get("context_id") or ""), int(entry.get("limit") or 50))
             _write_result(store, rid, {"ok": True, "messages": rows})
@@ -561,7 +590,7 @@ def _migrate_private(old: Path, new: Path) -> list[str]:
     return moved
 
 
-_TERMINAL = frozenset({"completed", "timeout", "queued", "busy", "error"})
+_TERMINAL = frozenset({"completed", "timeout", "queued", "busy", "error", "canceled"})
 #: Older than this, a delivery with no outcome cannot still be running (the idle wait plus
 #: the turn are capped at 600 s).
 _STALE_SECS = 900
@@ -581,6 +610,7 @@ def close_stale_deliveries(store: Store, now: Optional[float] = None) -> int:
         return 0
     now = time.time() if now is None else now
     open_rows: dict[str, dict] = {}
+    errored: dict[str, dict] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
             row = json.loads(line)
@@ -593,7 +623,19 @@ def close_stale_deliveries(store: Store, now: Optional[float] = None) -> int:
             open_rows[task] = row
         elif row.get("outcome") in _TERMINAL:
             open_rows.pop(task, None)
+            if row.get("outcome") == "error":
+                errored[task] = row
     closed = 0
+    # 0.5.0 left a gateway-refused send's task WORKING after its error row: close those too.
+    from .core import STATE_FAILED, make_task
+
+    for task, row in errored.items():
+        saved = store.load_task(task) if is_id(task) else None
+        if saved and (saved.get("status") or {}).get("state") == "TASK_STATE_WORKING":
+            failed = make_task(task, str(row.get("context") or ""), STATE_FAILED,
+                               str(row.get("error") or "Delivery failed")[:300])
+            store.save_task({**failed, **{k: v for k, v in saved.items() if k.startswith("_")}})
+            closed += 1
     for task, row in open_rows.items():
         try:
             started = calendar.timegm(time.strptime(str(row.get("ts", ""))[:19], "%Y-%m-%dT%H:%M:%S"))
@@ -607,6 +649,12 @@ def close_stale_deliveries(store: Store, now: Optional[float] = None) -> int:
             if data and data.get("turns", 0) > 0:
                 data["turns"] -= 1
                 store.write_context(ctx_id, data)
+        saved = store.load_task(task) if is_id(task) else None
+        if saved and (saved.get("status") or {}).get("state") == "TASK_STATE_WORKING":
+            from .core import STATE_FAILED, make_task
+
+            closed_task = make_task(task, ctx_id, STATE_FAILED, "No outcome was recorded; closed at startup.")
+            store.save_task({**closed_task, **{k: v for k, v in saved.items() if k.startswith("_")}})
         store.audit({"op": "send", "outcome": "error", "caller": row.get("caller"), "target": row.get("target"),
                      "context": ctx_id, "task": task, "reason": "stale",
                      "error": "no outcome was recorded (refused by the gateway or cut off); closed at startup"})

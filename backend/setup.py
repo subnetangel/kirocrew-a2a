@@ -20,13 +20,16 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Optional
 
 #: The server id kiro-cli knows a2a by in a Bot's spec (``<app>:<server>``).
 SERVER_ID = "a2a:a2a"
 TOOL_REF = f"@{SERVER_ID}"
 #: Every tool the a2a MCP server serves (``mcp_server.TOOLS``), kept in step by a test.
-TOOL_NAMES = ("a2a_list", "a2a_discover", "a2a_call", "a2a_orchestrate", "a2a_result", "a2a_history")
+#: The tools a Bot needs for a2a to work (0.4.x). Missing one is "Needs repair".
+CORE_TOOLS = ("a2a_list", "a2a_discover", "a2a_call", "a2a_orchestrate", "a2a_result", "a2a_history")
+#: Tools added since. Missing one is "Update available": the Bot still works.
+TOOL_NAMES = CORE_TOOLS + ("a2a_cancel", "a2a_tasks")
 #: System interpreters, in order. Never the gateway's own versioned runtime.
 PYTHON_CANDIDATES = ("/usr/bin/python3", "/usr/local/bin/python3", "/opt/homebrew/bin/python3")
 #: A path segment that marks the gateway's private, per-version runtime.
@@ -82,6 +85,8 @@ def bot_health(spec: Any, transport: dict, exists: Callable[[str], bool] = os.pa
     tools_enabled = TOOL_REF in tools or "*" in tools or f"{TOOL_REF}/*" in tools
     all_allowed = TOOL_REF in allowed or f"{TOOL_REF}/*" in allowed
     missing = [] if all_allowed else [r.rsplit("/", 1)[1] for r in tool_refs() if r not in allowed]
+    newer = [n for n in missing if n not in CORE_TOOLS]
+    missing = [n for n in missing if n in CORE_TOOLS]
     health = {
         "mounted": entry is not None,
         "disabled": bool((entry or {}).get("disabled")),
@@ -94,13 +99,17 @@ def bot_health(spec: Any, transport: dict, exists: Callable[[str], bool] = os.pa
         "labelled": (entry or {}).get("x-kirocrew-session-label") is True,
         "tools_enabled": tools_enabled,
         "tools_missing": missing,
+        "tools_newer": newer,
+        "all_allowed": all_allowed,
     }
     # Any system python3 that exists is fine; the script must be this app's own copy.
     health["matches"] = (health["mounted"] and not health["disabled"] and health["command_exists"]
                          and not health["fragile"] and health["this_app"] and health["script_exists"]
                          and health["labelled"])
     health["problems"] = problems(health)
+    # Tiers: "ok" is the required set only. Newer tools missing is an update, not a fault.
     health["ok"] = not health["problems"]
+    health["update_available"] = health["ok"] and bool(newer)
     return health
 
 
@@ -132,6 +141,24 @@ def problems(health: dict) -> list[str]:
     return out
 
 
+def _tool_ops(names: list, all_allowed: bool) -> list[dict]:
+    ops = [{"section": "allowedTools", "id": f"{TOOL_REF}/{name}", "action": "set", "value": True} for name in names]
+    if names and not all_allowed:
+        # The server-level entry (``@a2a:a2a``, accepted by 0.13.0.1's spec schema) lets
+        # tools a later a2a adds run without another heal. Per-tool entries ride along,
+        # so a host whose governance strips the server entry still gets these tools.
+        ops.append({"section": "allowedTools", "id": TOOL_REF, "action": "set", "value": True})
+    return ops
+
+
+def heal_ops(health: Optional[dict]) -> list[dict]:
+    """The auto-heal for one Bot: only when it already mounts a2a correctly and the only
+    drift is tools a newer a2a added. Only allowedTools a2a entries, never a mount."""
+    if not health or not health.get("ok") or not health.get("tools_newer"):
+        return []
+    return _tool_ops(health["tools_newer"], health.get("all_allowed", False))
+
+
 def repair_ops(health: dict, transport: dict) -> list[dict]:
     """The capability operations that bring one Bot to a healthy mount. ``[]`` when ok.
 
@@ -143,8 +170,7 @@ def repair_ops(health: dict, transport: dict) -> list[dict]:
         ops.append({"section": "mcpServers", "id": SERVER_ID, "action": "set", "value": dict(transport)})
     if not health["tools_enabled"]:
         ops.append({"section": "tools", "id": TOOL_REF, "action": "set", "value": True})
-    for name in health["tools_missing"]:
-        ops.append({"section": "allowedTools", "id": f"{TOOL_REF}/{name}", "action": "set", "value": True})
+    ops.extend(_tool_ops(health["tools_missing"] + health.get("tools_newer", []), health.get("all_allowed", False)))
     return ops
 
 
@@ -180,6 +206,7 @@ def plan(bots: list[dict], allow: Any, transport: dict) -> dict:
             "owned": owned, "unreadable": bool(b.get("unreadable")), "chat": b.get("chat", True) is not False,
             "health": health,
             "ops": repair_ops(health, transport) if health else [],
+            "heal": heal_ops(health),
         })
     ids = [b["id"] for b in bots]
     gaps = missing_pairs(ids, allow)

@@ -37,7 +37,7 @@ export function Button({ kind = 'default', icon, children, className, busy, ...r
 
 const PILL = {
   answered: ['Check', 'Answered'], refused: ['Ban', 'Refused'], failed: ['TriangleAlert', 'Failed'],
-  working: ['Clock', 'In progress'], info: ['Info', 'Note'], ok: ['Check', 'OK'], bad: ['X', 'Needs repair'],
+  working: ['Clock', 'In progress'], info: ['Info', 'Note'], update: ['ArrowUpCircle', 'Update available'], ok: ['Check', 'OK'], bad: ['X', 'Needs repair'],
 }
 
 /** A status word with an icon, so state never rides on colour alone. */

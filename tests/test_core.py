@@ -212,7 +212,7 @@ def test_redaction_failure_fails_closed(tmp_path):
     (b"{not json", core.PARSE_ERROR),
     (b"[]", core.INVALID_REQUEST),
     (json.dumps({"jsonrpc": "1.0", "id": 1, "method": "message/send"}), core.INVALID_REQUEST),
-    (json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tasks/cancel", "params": {}}), core.METHOD_NOT_FOUND),
+    (json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tasks/resubscribe", "params": {}}), core.METHOD_NOT_FOUND),
     (json.dumps({"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": []}), core.INVALID_PARAMS),
     (json.dumps({"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {"message": {"parts": []}}}),
      core.INVALID_PARAMS),
@@ -502,3 +502,106 @@ def test_setup_never_changes_the_turn_cap():
     from backend import setup as setup_mod
     plan = setup_mod.plan([], {"a": ["b"]}, {"command": "/usr/bin/python3", "args": ["x"]})
     assert "max_turns_per_context" not in json.dumps(plan)
+
+
+# ------------------------------------------------------------- 0.5.0 task control
+
+
+def test_cancel_stops_waiting_gives_the_turn_back_and_drops_a_late_answer(tmp_path):
+    svc, _ = make(tmp_path, ALLOW)
+    gate = asyncio.Event()
+
+    async def slow(slug, text, banner=""):
+        await gate.wait()
+        return "late answer"
+
+    svc.gw.deliver = slow
+
+    async def go():
+        task = await svc.send("assistant", "Assistant", "researcher", "q", ctx="c-x", return_immediately=True)
+        assert task["status"]["state"] == core.STATE_WORKING
+        assert svc.store.read_context("c-x")["turns"] == 1
+        with pytest.raises(core.A2AError):
+            svc.cancel_task("writer", task["id"])  # someone else's task: not found
+        out = svc.cancel_task("assistant", task["id"])
+        assert out["status"]["state"] == core.STATE_CANCELED
+        assert svc.store.read_context("c-x")["turns"] == 0
+        gate.set()
+        await asyncio.sleep(0.05)
+        assert svc.get_task("assistant", task["id"])["status"]["state"] == core.STATE_CANCELED
+        with pytest.raises(core.A2AError) as err:
+            svc.cancel_task("assistant", task["id"])
+        assert err.value.code == core.TASK_NOT_CANCELABLE
+    run(go())
+
+
+def test_return_immediately_then_get_task_sees_the_answer(tmp_path):
+    svc, _ = make(tmp_path, ALLOW)
+
+    async def go():
+        task = await svc.send("assistant", "Assistant", "researcher", "q", return_immediately=True)
+        assert task["status"]["state"] == core.STATE_WORKING
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if svc.get_task("assistant", task["id"])["status"]["state"] == core.STATE_COMPLETED:
+                break
+        assert svc.get_task("assistant", task["id"])["status"]["state"] == core.STATE_COMPLETED
+    run(go())
+
+
+def test_return_immediately_still_refuses_up_front(tmp_path):
+    svc, _ = make(tmp_path, ALLOW)
+    with pytest.raises(core.A2AError, match="not permitted"):
+        run(svc.send("writer", "Writer", "researcher", "q", return_immediately=True))
+
+
+def test_list_tasks_is_scoped_to_the_caller(tmp_path):
+    svc, _ = make(tmp_path, {"allow": {"assistant": ["researcher"], "writer": ["researcher"]}})
+    run(svc.send("assistant", "Assistant", "researcher", "one"))
+    run(svc.send("writer", "Writer", "researcher", "two"))
+    mine = svc.list_tasks("assistant")
+    assert len(mine) == 1 and "_caller" not in mine[0]
+    every = svc.list_tasks("", as_owner=True, bot="researcher")
+    assert {t["caller"] for t in every} == {"assistant", "writer"}
+    out = run(svc.handle_rpc("assistant", "Assistant", "researcher",
+                             json.dumps({"jsonrpc": "2.0", "id": 9, "method": "tasks/list", "params": {}})))
+    assert len(out["result"]["tasks"]) == 1
+
+
+def test_rate_limit_refuses_past_the_owner_limit(tmp_path):
+    svc, host = make(tmp_path, {**ALLOW, "rate_limit": {"sends": 2, "window_secs": 600}})
+    run(svc.send("assistant", "Assistant", "researcher", "a"))
+    run(svc.send("assistant", "Assistant", "researcher", "b"))
+    with pytest.raises(core.A2AError) as err:
+        run(svc.send("assistant", "Assistant", "researcher", "c"))
+    assert err.value.reason == "RATE_LIMITED" and len(host.delivered) == 2
+    assert Policy.from_dict({}).to_dict()["rate_limit"] == {"sends": 30, "window_secs": 600}
+    assert Policy.from_dict({"rate_limit": {"sends": 9999, "window_secs": 5}}).to_dict()["rate_limit"] == {
+        "sends": 300, "window_secs": 60}
+
+
+def test_rpc_cancel_method(tmp_path):
+    svc, _ = make(tmp_path, ALLOW)
+    task = run(svc.send("assistant", "Assistant", "researcher", "q"))
+    out = run(svc.handle_rpc("assistant", "Assistant", "researcher", json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": "tasks/cancel", "params": {"id": task["id"]}})))
+    assert out["error"]["code"] == core.TASK_NOT_CANCELABLE  # already completed
+
+
+def test_orchestrate_all_skips_off_roster_agents_and_they_do_not_count(tmp_path):
+    # "mate" exists and the policy allows it, but it is not a roster Bot.
+    BOTS["mate"] = "mate"
+    try:
+        policy = {"allow": {"assistant": ["assistant", "researcher", "writer", "mate"]},
+                  "orchestrate": {"max_bots": 2, "time_budget_secs": 5}}
+        svc, host = make(tmp_path, policy)
+        svc.gw.is_roster = lambda slug: slug != "mate"
+        out = run(svc.orchestrate("assistant", "Assistant", ["all"], "q"))
+        # Two roster Bots fit a limit of 2: mate is neither asked nor counted, the caller is skipped.
+        assert [r["agent"] for r in out["results"]] == ["researcher", "writer"]
+        assert {s for s, _ in host.delivered} == {"researcher", "writer"}
+        # An explicit list longer than the limit is still refused, not trimmed.
+        with pytest.raises(core.A2AError, match="asks 3 Bots and your owner allows at most 2"):
+            run(svc.orchestrate("assistant", "Assistant", ["researcher", "writer", "mate"], "q"))
+    finally:
+        BOTS.pop("mate", None)

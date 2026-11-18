@@ -22,14 +22,14 @@ function BotHealth({ bot, onRepair, onOpenBot }) {
   return h('li', { className: `a2a-health-row ${hl.ok ? '' : 'is-bad'}` },
     h('div', { className: 'a2a-health-head' },
       h('strong', null, bot.name),
-      h(Pill, { tone: hl.ok ? 'ok' : 'bad' }, hl.ok ? 'Healthy' : 'Needs repair'),
+      h(Pill, { tone: !hl.ok ? 'bad' : hl.update_available ? 'update' : 'ok' }, !hl.ok ? 'Needs repair' : hl.update_available ? 'Update available' : 'Healthy'),
       !hl.ok && bot.ops.length ? h(Button, { kind: 'quiet', icon: 'Wrench', onClick: () => onRepair([bot.id]) }, 'Repair') : null),
     bot.chat === false ? h('p', { className: 'a2a-faint' }, `No chat yet: ${bot.name} can ask once its tools are mounted, but cannot be asked until you open its chat once.`) : null,
     h('ul', { className: 'a2a-health-checks' },
       h(Check, { ok: hl.mounted && !hl.disabled, label: 'Server mounted' }),
       h(Check, { ok: hl.command_exists && !hl.fragile, label: hl.fragile && hl.command_exists ? 'Command survives upgrades' : 'Command path exists', detail: hl.command || '' }),
       h(Check, { ok: hl.tools_enabled && !hl.tools_missing.length, label: 'Tools allowed',
-        detail: hl.tools_missing.length ? `missing ${hl.tools_missing.join(', ')}` : '' })),
+        detail: hl.tools_missing.length ? `missing ${hl.tools_missing.join(', ')}` : hl.tools_newer && hl.tools_newer.length ? `newer tools not added yet: ${hl.tools_newer.join(', ')}` : '' })),
     !hl.ok ? h('p', { className: 'a2a-faint' }, hl.problems.join('. ') + '.') : null)
 }
 

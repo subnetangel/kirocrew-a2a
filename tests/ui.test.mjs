@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { filterItems, groupRows, reasonText } from '../ui/lib/feed.mjs'
-import { commit, forgetReview, prepare, reviewFor, verify } from '../ui/lib/apply.mjs'
+import { commit, forgetReview, prepare, reviewFor, verify, with503Retry } from '../ui/lib/apply.mjs'
+import { autoHeal, undoHeal } from '../ui/lib/heal.mjs'
 
 const rows = [
   { ts: '2026-11-18T00:00:01Z', op: 'send', outcome: 'delivering', caller: 'assistant', target: 'researcher', context: 'c1', turn: 1 },
@@ -165,13 +166,12 @@ test('a re-render, poll or remount during review never starts a second review', 
   forgetReview('run-2')
 })
 
-test('previews run at most 3 at a time, and a hung Bot times out on its own line', async () => {
+test('previews run one at a time, and a hung Bot times out on its own line', async () => {
   const client = slowClient({ delay: 15, hang: 'b2' })
   const updates = []
   const t0 = Date.now()
   const out = await prepare(client, sixPlan, { timeoutMs: 120, onUpdate: s => updates.push(s.checked) })
-  assert.ok(client.stats.maxLive <= 3, `max in flight ${client.stats.maxLive}`)
-  assert.ok(client.stats.maxLive >= 2, 'previews ran in parallel')
+  assert.equal(client.stats.maxLive, 1, `max in flight ${client.stats.maxLive}`)
   const states = Object.fromEntries(out.steps.map(s => [s.bot.id, s.state]))
   assert.equal(states.b2, 'timeout')
   assert.deepEqual(Object.values(states).filter(x => x === 'ready').length, 5)
@@ -318,4 +318,56 @@ test('the activity view defaults to the last 24 hours', async () => {
   const items = [{ last: '2026-11-18T11:00:00Z', caller: 'a', targets: [] }, { last: '2026-11-16T11:00:00Z', caller: 'a', targets: [] }]
   assert.equal(filterItems(items, {}, now).length, 1)
   assert.equal(filterItems(items, { since: 'all' }, now).length, 2)
+})
+
+
+test('a 503 is retried twice, then gives up', async () => {
+  let n = 0
+  const flaky = async () => { n++; if (n < 3) throw Object.assign(new Error('HTTP 503'), { status: 503 }); return 'ok' }
+  assert.equal(await with503Retry(flaky, { delayMs: 1 }), 'ok')
+  n = -10
+  await assert.rejects(with503Retry(flaky, { delayMs: 1 }), /503/)
+  let m = 0
+  await assert.rejects(with503Retry(async () => { m++; throw Object.assign(new Error('HTTP 409'), { status: 409 }) }, { delayMs: 1 }))
+  assert.equal(m, 1, 'only a 503 is retried')
+})
+
+function healClient(fail = []) {
+  const calls = []
+  return { calls,
+    capabilities: async a => { calls.push(['GET', a]); if (fail.includes(a)) throw Object.assign(new Error('HTTP 503'), { status: 503 }); return { revision: `r-${a}` } },
+    previewCapabilities: async (a, body) => { calls.push(['PREVIEW', a, body.operations]); return { preview_token: `t-${a}` } },
+    commitCapabilities: async (a, body) => { calls.push(['PUT', a, body.operations, body.preview_token]) } }
+}
+const healOps = [{ section: 'allowedTools', id: '@a2a:a2a/a2a_cancel', action: 'set', value: true },
+  { section: 'allowedTools', id: '@a2a:a2a', action: 'set', value: true }]
+const healSetup = { bots: [
+  { id: 'a', agent: 'A', health: { ok: true }, heal: healOps },
+  { id: 'b', agent: 'B', health: { ok: true }, heal: [] },
+  { id: 'c', agent: 'C', health: { ok: false }, heal: healOps },  // a fault is Repair's job
+  { id: 'd', agent: 'D', health: { ok: true }, heal: [{ section: 'mcpServers', id: 'a2a:a2a', action: 'set', value: {} }] },
+  { id: 'e', agent: 'E', health: { ok: true }, heal: healOps } ] }
+
+test('auto-heal only adds a2a tools, only to healthy mounts, one Bot at a time', async () => {
+  const client = healClient(['E'])
+  const r = await autoHeal(client, healSetup, { auto_update_tools: true }, { retryDelayMs: 1 })
+  assert.deepEqual(r.healed.map(h => h.id), ['a'])
+  assert.deepEqual(r.failed, ['e'])  // stays amber; tried again next load
+  const puts = client.calls.filter(c => c[0] === 'PUT')
+  assert.equal(puts.length, 1)
+  assert.ok(puts[0][2].every(o => o.section === 'allowedTools' && o.id.startsWith('@a2a:a2a')))
+  assert.equal(client.calls.filter(c => c[1] === 'E' && c[0] === 'GET').length, 3)  // two 503 retries
+  assert.ok(!client.calls.some(c => ['B', 'C', 'D'].includes(c[1])))
+})
+
+test('auto-heal is off when the owner turns it off, and Undo removes exactly what it added', async () => {
+  const off = healClient()
+  assert.deepEqual(await autoHeal(off, healSetup, { auto_update_tools: false }), { healed: [], failed: [] })
+  assert.equal(off.calls.length, 0)
+  const client = healClient()
+  const r = await autoHeal(client, { bots: [healSetup.bots[0]] }, {}, { retryDelayMs: 1 })
+  client.calls.length = 0
+  assert.deepEqual(await undoHeal(client, r.healed, { retryDelayMs: 1 }), [])
+  const put = client.calls.find(c => c[0] === 'PUT')
+  assert.deepEqual(put[2], healOps.map(o => ({ section: 'allowedTools', id: o.id, action: 'remove' })))
 })

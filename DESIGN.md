@@ -238,7 +238,10 @@ stdlib-only so it runs on any host `python3` 3.9 or newer, which is what makes t
 stable command possible.
 
 **Fan-out to every Bot.** `a2a_orchestrate(agents=["all"])` asks every Bot the
-owner's policy lets the caller ask (and that still exists), sorted by id. The hard
+owner's policy lets the caller ask, that still exists and that is one of the
+owner's roster Bots (the dashboard's Crewmates rule), sorted by id. Policy entries
+for agents off the roster, such as `mate` or an app's agent, are skipped and don't
+count toward the limit; naming one explicitly still works if the policy allows it. The hard
 cap is now 16 Bots per run; the owner default stays 4, and the one-click setup
 offers to raise it to all the owner's Bots, with the count shown. A run that asks
 for more Bots than the owner's limit is refused with a message naming both
@@ -334,3 +337,64 @@ fold into one row marked "×N", which expands to each attempt. The feed shows th
 **Default turn cap 5.** `DEFAULT_MAX_TURNS` is 5 (was 3); `HARD_MAX_TURNS` stays 10. A
 saved policy keeps its own value, and setup never changes it. A saved value below 1 reads
 as 1, above 10 as 10, and a non-number as the default.
+
+## 0.5.0
+
+**A2A tab in each Bot's chat side panel** (`contributes.panelTabs`, `ui/panel.mjs`). The
+0.13.0.1 app SDK documents `useAppInfo().session.sessionKey` as present for a panel tab,
+the same key the scoped client sends as `X-Session-Key`. The tab sends that key to the
+owner-only `GET /session-bot`, which maps it to a Bot through the gateway's own records
+(`hooks.caller_slug_for_session`) and answers only with a roster Bot. The key picks what
+the owner sees and grants nothing. A chat that isn't a Bot's, or a host without the field,
+gets a Bot picker that remembers the last choice, and "Open in A2A" deep-links to
+`/apps/a2a?bot=<id>`. The tab shows this Bot's health, with a chat-open check and the
+reviewed Repair. Below that are its matrix row and column as checkboxes, each change saved
+through the owner-only `PUT /policy`, which keeps every other pair. Then its open tasks
+with Cancel, and its conversations with the full question and answer. New owner-only
+read routes: `GET /session-bot` and `GET /bot/{slug}`, plus `POST /tasks/{id}/cancel`. No
+new listener. `panelTabs` is not a staged grant family on 0.13.0.1 (`STAGED_GRANT_FAMILIES`
+holds api, events, the link/message/composer/selection points, workerAutoApprove,
+reachableByUserSessions, desktopCapabilities, bots and frameSources), so adding the tab
+asks for no new approval. The update notes say so.
+
+**Task control.**
+- `tasks/cancel` (CancelTask): a2a stops waiting, drops any answer that still arrives,
+  stores the task as `TASK_STATE_CANCELED` and gives the turn back. A finished task answers
+  -32002 TaskNotCancelable.
+- `tasks/list` (ListTasks) returns only the caller's own tasks.
+- `configuration.returnImmediately` (or `blocking: false`) on `message/send` returns a
+  `WORKING` task once every check has passed; the turn continues in the background.
+- Per-caller rate limit: owner-set `rate_limit` in the policy, default 30 sends per 10
+  minutes (bounds 1-300 sends, 60-3600 s). Past it, -32603 with ErrorInfo `RATE_LIMITED`.
+- New tools `a2a_cancel` and `a2a_tasks`. Replies now carry the task id.
+
+**What would make cancel real (core-hook proposal).** An app may not interrupt a Bot's
+thread, so cancel cannot stop the asked Bot's turn. It may still finish its reply in its
+own chat, and `a2a_cancel` says so. A core hook letting an app with `memberThreads` stop
+the turn it started would make cancel end the work too.
+
+**Input-required (0.5.1, decided).** The asked Bot may end its answer with one line,
+`A2A-NEEDS-INPUT: <question>`. a2a then returns `TASK_STATE_INPUT_REQUIRED` with that
+question, which is untrusted, scrubbed and capped at 500 characters. The caller answers on
+the same task, and each round counts against the turn cap.
+
+**Files (0.5.3, checked).** `/api/chat` carries attachments as `meta.files` and
+`meta.dirs`, which are paths on this machine, not uploaded bytes (`chat_send.attachment_meta`).
+A file part would mean a2a writing peer bytes to disk and handing the asked Bot a path.
+That is a sandbox question to settle in 0.5.3 before building. Until then, data parts only.
+
+## 0.5.1
+
+**Why 0.5.0's setup failed.** Health marked 8 of 9 Bots "Needs repair" only because the two new tools (`a2a_cancel`, `a2a_tasks`) weren't allowed. The setup review then ran its capability previews 3 at a time on a loaded box. Each `GET /api/agents/b64/<id>/capabilities` hit the gateway's 20 s read deadline (`_GET_TIMEOUT_SECS`) and answered 503 `capabilities_unavailable`.
+
+**Health tiers.** "Needs repair" means a required part is broken: the server isn't mounted or is off, the command is missing or inside the upgrade-deleted runtime folder, the script is another copy, the session label is off, or one of the 6 core tools is missing. Tools a newer a2a added and the Bot doesn't have yet show **Update available** (amber), and the Bot counts as healthy.
+
+**Auto-heal.** When the owner opens the A2A page or a Bot's panel tab, every Bot whose only drift is newer a2a tools gets them through the same owner preview, then PUT. There's no button press, and Bots go one at a time. A status line reads "Updated N Bots to the 0.5.1 tool list", with Undo, which removes exactly the entries it added. The backend's `heal` ops are allowedTools `@a2a:a2a...` entries only. A Bot without the server, or with any required fault, is never healed; that's Repair's job, with a review. A failed Bot stays amber and is tried again on the next page load. The owner setting "Keep my Bots' A2A tools up to date" (policy `auto_update_tools`, default on) under Limits turns it off.
+
+**Server-level entry.** 0.13.0.1's spec schema accepts `@a2a:a2a` in `allowedTools` as "the whole server" (`agent_spec_schema._tool_entry_problem`). Heal and Repair add it alongside the per-tool entries, so tools a later a2a adds need no heal. Health counts it as every tool allowed. Trade-off: any tool a future a2a ships runs without a prompt on that Bot. Every a2a tool is answer-only and policy-gated, so this is the owner's own app widening its own grant. If a governance ceiling strips the entry, the per-tool entries still apply.
+
+**Previews** run one at a time. A 503 is retried twice, 5 s apart, inside a 75 s per-Bot deadline, and the dialog shows each Bot's preview time.
+
+**0.5.1 also:**
+- **Panel scrolling.** The side-panel tab's root (`.a2a.a2a-side`) is its own scroll container: `height: 100%; min-height: 0; overflow-y: auto; overscroll-behavior: contain`. The page root `.a2a` is unchanged. The name `.a2a-panel` belongs to the page's tab panels, so the rule stays off it.
+- **Stuck "In progress" tasks.** In 0.5.0, a send the gateway refused (no chat yet) left its saved `WORKING` task in place, because only the audit row closed. Now the task is saved as `FAILED` with the refusal text. On startup, any `WORKING` task whose audit shows an error, or a delivery with no outcome after 15 minutes, is closed as `FAILED` once.

@@ -11,6 +11,9 @@ assert who is calling.
 - ``GET  /policy`` / ``PUT /policy``       owner only
 - ``GET  /audit``                          owner only, last N audit rows
 - ``GET  /bots``, ``/conversations/{ctx}``   owner only, for the page
+- ``GET  /session-bot?key=``, ``GET /bot/{slug}``, ``POST /tasks/{id}/cancel``:
+  owner only, for the per-Bot chat side-panel tab. The session key is resolved to a
+  Bot only through the gateway's own records (``hooks.caller_slug_for_session``).
 - ``GET  /setup``                          owner only: the one-click setup plan and
   each Bot's a2a health, read only. The page applies the plan with the owner's own
   session through the host's capability API; no route here writes a Bot's spec.
@@ -22,7 +25,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from aiohttp import web
 
@@ -152,6 +155,9 @@ def register_routes(ctx: Any) -> list[Route]:
         Route("GET", "/bots", get_bots),
         Route("GET", "/conversations/{context}", get_conversation),
         Route("GET", "/setup", get_setup),
+        Route("GET", "/session-bot", get_session_bot),
+        Route("GET", "/bot/{slug}", get_bot_view),
+        Route("POST", "/tasks/{task_id}/cancel", post_cancel_task),
     ]
 
 
@@ -169,12 +175,7 @@ def is_roster_bot(name: str, agent: Any) -> bool:
     (``members.is_person_created_crewmate``: created here, with a member id). Built-in
     and app-installed agents that happen to carry a member id (workers, conductors, an
     app's own agents) are not, and a2a leaves them out of setup, Health and the grid."""
-    try:
-        from kiro_crew import members as members_mod
-
-        return bool(members_mod.is_person_created_crewmate(name, agent))
-    except Exception:  # noqa: BLE001 -- unknown is not a Bot
-        return False
+    return hooks.is_roster_bot(name, agent)
 
 
 def _all_bots() -> list[dict]:
@@ -316,3 +317,63 @@ async def get_setup(request: web.Request, ctx: Any) -> web.Response:
     allow = _svc().store.policy().to_dict()["allow"]
     rows = await asyncio.to_thread(_audit_tail)
     return web.json_response(await asyncio.to_thread(_setup_view, allow, rows))
+
+
+async def get_session_bot(request: web.Request, ctx: Any) -> web.Response:
+    """Which roster Bot a chat session belongs to, from the gateway's own records.
+    The key only selects what the owner looks at; it grants nothing."""
+    denied = await _owner_only(request, ctx, "a2a.session_bot")
+    if denied is not None:
+        return denied
+    key = request.query.get("key", "")
+    slug = await asyncio.to_thread(hooks.caller_slug_for_session, key) if key else ""
+    roster = {b["id"] for b in await asyncio.to_thread(_all_bots)}
+    return web.json_response({"bot": slug if slug in roster else ""})
+
+
+def _bot_view(slug: str, policy: dict) -> Optional[dict]:
+    view = _setup_view(policy["allow"], _audit_tail())
+    bot = next((b for b in view["bots"] if b["id"] == slug), None)
+    if bot is None:
+        return None
+    ids = [b["id"] for b in view["bots"]]
+    allow = policy["allow"]
+    rows = [r for r in _audit_tail() if slug in (r.get("caller"), r.get("target"))
+            or slug in str(r.get("targets", "")).split(",")]
+    return {
+        "bot": bot, "bots": [{"id": b["id"], "name": b["name"], "chat": b["chat"]} for b in view["bots"]],
+        "may_ask": sorted(t for t in allow.get(slug, []) if t in ids),
+        "asked_by": sorted(a for a in ids if slug in allow.get(a, [])),
+        "rows": rows[-400:],
+        "tasks": _svc().list_tasks("", bot=slug, as_owner=True, limit=50),
+        "transport": view["transport"], "version": view["version"], "max_turns": policy["max_turns_per_context"],
+    }
+
+
+async def get_bot_view(request: web.Request, ctx: Any) -> web.Response:
+    denied = await _owner_only(request, ctx, "a2a.bot_view")
+    if denied is not None:
+        return denied
+    from .core import is_slug
+
+    slug = request.match_info.get("slug", "")
+    if not is_slug(slug):
+        return web.json_response({"error": "not found"}, status=404)
+    view = await asyncio.to_thread(_bot_view, slug, _svc().store.policy().to_dict())
+    if view is None:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response(view)
+
+
+async def post_cancel_task(request: web.Request, ctx: Any) -> web.Response:
+    denied = await _owner_only(request, ctx, "a2a.task_cancel")
+    if denied is not None:
+        return denied
+    from .core import A2AError
+
+    try:
+        task = _svc().cancel_task("owner", request.match_info.get("task_id", ""), as_owner=True)
+    except A2AError as err:
+        status = 404 if err.code == -32001 else 409
+        return web.json_response({"error": err.message, "code": err.reason or "task_not_found"}, status=status)
+    return web.json_response(task)

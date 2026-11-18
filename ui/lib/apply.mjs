@@ -10,8 +10,11 @@
 // re-render, a poll or a remount of the dialog re-attaches to the same run instead of
 // starting another. Previews run at most PREVIEW_CAP at a time, each with its own timeout.
 
-export const PREVIEW_CAP = 3
-export const PREVIEW_TIMEOUT_MS = 30000
+// One at a time: on a loaded gateway, parallel previews all ran into its 20 s read deadline.
+export const PREVIEW_CAP = 1
+export const RETRY_503 = 2
+export const RETRY_DELAY_MS = 5000
+export const PREVIEW_TIMEOUT_MS = 75000
 
 const SECTION_WORDS = {
   mcpServers: 'MCP server', tools: 'tools enabled', allowedTools: 'tool allowed without asking', autoApprove: 'auto-approve',
@@ -27,8 +30,20 @@ class TimeoutError extends Error {
   constructor(ms) { super(`No answer from the dashboard in ${Math.round(ms / 1000)} s`); this.name = 'TimeoutError' }
 }
 
+const sleep = ms => new Promise(r => setTimeout(r, ms))
+
+/** *fn()* again after a 503 (the host's capabilities_unavailable), *retries* times. */
+export async function with503Retry(fn, { retries = RETRY_503, delayMs = RETRY_DELAY_MS, signal } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try { return await fn() } catch (e) {
+      if (!(e && e.status === 503) || attempt >= retries || (signal && signal.aborted)) throw e
+      await sleep(delayMs)
+    }
+  }
+}
+
 /** Preview one Bot's a2a changes into *step*, in place. Never throws. */
-export async function previewBot(client, step, { timeoutMs = PREVIEW_TIMEOUT_MS, signal, onUpdate = () => {} } = {}) {
+export async function previewBot(client, step, { timeoutMs = PREVIEW_TIMEOUT_MS, signal, onUpdate = () => {}, retryDelayMs = RETRY_DELAY_MS } = {}) {
   const bot = step.bot
   const ctl = new AbortController()
   const stop = () => ctl.abort()
@@ -39,11 +54,13 @@ export async function previewBot(client, step, { timeoutMs = PREVIEW_TIMEOUT_MS,
   try {
     const work = (async () => {
       const init = { signal: ctl.signal }
-      const view = await client.capabilities(bot.agent, init)
+      const retry = { delayMs: retryDelayMs, signal: ctl.signal }
+      const view = await with503Retry(() => client.capabilities(bot.agent, init), retry)
       const body = { revision: view.revision, operations: bot.ops }
-      const preview = await client.previewCapabilities(bot.agent, body, init)
+      const preview = await with503Retry(() => client.previewCapabilities(bot.agent, body, init), retry)
       return { body, preview }
     })()
+    // The deadline covers the retries too: 3 tries of the host's 20 s read plus 2 waits.
     const timeout = new Promise((_, reject) => { timer = setTimeout(() => { ctl.abort(); reject(new TimeoutError(timeoutMs)) }, timeoutMs) })
     const { body, preview } = await Promise.race([work, timeout])
     step.body = { ...body, preview_token: preview.preview_token }
@@ -93,7 +110,7 @@ export function summarize(steps) {
  * Resolves to summarize(steps); onUpdate(summary) fires on every change.
  */
 export async function prepare(client, { setup, policy, grants, want },
-  { cap = PREVIEW_CAP, timeoutMs = PREVIEW_TIMEOUT_MS, signal, onUpdate = () => {} } = {}) {
+  { cap = PREVIEW_CAP, timeoutMs = PREVIEW_TIMEOUT_MS, signal, onUpdate = () => {}, retryDelayMs = RETRY_DELAY_MS } = {}) {
   const steps = []
   const orch = policy.orchestrate || {}
   const raise = want.orchAll && want.orchAll > (orch.max_bots || 0) ? want.orchAll : 0
@@ -121,7 +138,7 @@ export async function prepare(client, { setup, policy, grants, want },
   const emit = () => onUpdate(summarize(steps))
   emit()
   await pool(steps.filter(s => s.kind === 'bot').map(s => () =>
-    signal && signal.aborted ? Promise.resolve() : previewBot(client, s, { timeoutMs, signal, onUpdate: emit })), cap)
+    signal && signal.aborted ? Promise.resolve() : previewBot(client, s, { timeoutMs, signal, onUpdate: emit, retryDelayMs })), cap)
   return summarize(steps)
 }
 

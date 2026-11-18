@@ -28,6 +28,8 @@ STATE_COMPLETED = "TASK_STATE_COMPLETED"
 STATE_WORKING = "TASK_STATE_WORKING"
 STATE_FAILED = "TASK_STATE_FAILED"
 STATE_REJECTED = "TASK_STATE_REJECTED"
+STATE_CANCELED = "TASK_STATE_CANCELED"
+TERMINAL_STATES = frozenset({STATE_COMPLETED, STATE_FAILED, STATE_REJECTED, STATE_CANCELED})
 ROLE_USER = "ROLE_USER"
 ROLE_AGENT = "ROLE_AGENT"
 
@@ -42,12 +44,15 @@ METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
 TASK_NOT_FOUND = -32001
+TASK_NOT_CANCELABLE = -32002
 UNAUTHORIZED = -32050
 #: ErrorInfo domain for this app's own reasons (A2A's own reasons use "a2a-protocol.org").
 ERROR_DOMAIN = "kirocrew.a2a"
 
 SEND_METHODS = frozenset({"message/send", "SendMessage"})
 GET_METHODS = frozenset({"tasks/get", "GetTask"})
+CANCEL_METHODS = frozenset({"tasks/cancel", "CancelTask"})
+LIST_METHODS = frozenset({"tasks/list", "ListTasks"})
 
 #: The only action scope this release implements (#19228 "answer only").
 SCOPE_ANSWER_ONLY = "answer_only"
@@ -62,6 +67,10 @@ MAX_MESSAGE_CHARS = 8000
 MAX_REPLY_CHARS = 20000
 #: One open task per (caller, target, identical message) inside this window.
 DEDUP_SECS = 300
+#: Per-caller send rate limit: sends per window, default and bounds (owner-set).
+DEFAULT_RATE_SENDS, HARD_RATE_SENDS = 30, 300
+DEFAULT_RATE_WINDOW, MIN_RATE_WINDOW, HARD_RATE_WINDOW = 600, 60, 3600
+MAX_LIST_TASKS = 100
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
@@ -128,6 +137,10 @@ class Policy:
     scope: str = SCOPE_ANSWER_ONLY
     orch_targets: int = DEFAULT_ORCH_TARGETS
     orch_secs: int = DEFAULT_ORCH_SECS
+    rate_sends: int = DEFAULT_RATE_SENDS
+    rate_window: int = DEFAULT_RATE_WINDOW
+    #: Owner setting: the page adds tools a newer a2a ships to Bots that already mount it.
+    auto_update_tools: bool = True
 
     @classmethod
     def from_dict(cls, data: Any) -> "Policy":
@@ -146,9 +159,13 @@ class Policy:
         turns = max(1, turns)  # clamped to 1..HARD_MAX_TURNS below
         scope = data.get("scope", SCOPE_ANSWER_ONLY)
         orch = data.get("orchestrate") if isinstance(data.get("orchestrate"), dict) else {}
+        rate = data.get("rate_limit") if isinstance(data.get("rate_limit"), dict) else {}
         return cls(allow=allow, max_turns=min(turns, HARD_MAX_TURNS), scope=scope,
                    orch_targets=_bounded(orch.get("max_bots"), DEFAULT_ORCH_TARGETS, HARD_ORCH_TARGETS),
-                   orch_secs=_bounded(orch.get("time_budget_secs"), DEFAULT_ORCH_SECS, HARD_ORCH_SECS))
+                   orch_secs=_bounded(orch.get("time_budget_secs"), DEFAULT_ORCH_SECS, HARD_ORCH_SECS),
+                   rate_sends=_bounded(rate.get("sends"), DEFAULT_RATE_SENDS, HARD_RATE_SENDS),
+                   auto_update_tools=data.get("auto_update_tools") is not False,
+                   rate_window=max(MIN_RATE_WINDOW, _bounded(rate.get("window_secs"), DEFAULT_RATE_WINDOW, HARD_RATE_WINDOW)))
 
     @classmethod
     def load(cls, path: Path) -> "Policy":
@@ -169,6 +186,8 @@ class Policy:
             "scope": self.scope,
             "max_turns_per_context": self.max_turns,
             "orchestrate": {"max_bots": self.orch_targets, "time_budget_secs": self.orch_secs},
+            "rate_limit": {"sends": self.rate_sends, "window_secs": self.rate_window},
+            "auto_update_tools": self.auto_update_tools,
             "allow": {k: sorted(v) for k, v in sorted(self.allow.items())},
         }
 
@@ -266,6 +285,20 @@ class Store:
             return json.loads((self.private / "tasks" / f"{task_id}.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
+
+    def tasks(self) -> list[dict]:
+        """Every stored task, newest first. shortcut: reads every file; index when tasks
+        number in the thousands."""
+        out = []
+        for path in (self.private / "tasks").glob("*.json"):
+            try:
+                task = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(task, dict):
+                out.append(task)
+        out.sort(key=lambda t: str((t.get("status") or {}).get("timestamp", "")), reverse=True)
+        return out
 
     def audit(self, event: dict) -> None:
         self.audit_path.parent.mkdir(parents=True, exist_ok=True)
@@ -367,7 +400,7 @@ def parse_request(raw: bytes | str) -> tuple[Any, str, dict]:
     if not isinstance(params, dict):
         raise A2AError(INVALID_PARAMS, "params must be an object")
     method = body["method"]
-    if method not in SEND_METHODS | GET_METHODS:
+    if method not in SEND_METHODS | GET_METHODS | CANCEL_METHODS | LIST_METHODS:
         raise A2AError(METHOD_NOT_FOUND, f"method not found: {method[:64]}")
     return body.get("id"), method, params
 
@@ -443,6 +476,8 @@ class Gateway:
     neutralize: Callable[[str], str] = lambda s: s
     flagged: Callable[[str], bool] = lambda s: False
     audit: Callable[[str, str, str], None] = lambda op, outcome, res: None
+    #: slug -> whether it is one of the owner's roster Bots; only those count toward "all".
+    is_roster: Callable[[str], bool] = lambda slug: True
     timeout_secs: float = 600.0  # idle wait (up to 240 s) plus the turn itself
 
 
@@ -454,6 +489,12 @@ class A2AService:
         self._recent: dict[tuple, tuple[float, str]] = {}
         #: Bots answering a peer message right now. They may not start a call of their own.
         self._answering: dict[str, int] = {}
+        #: Per-caller send times inside the rate window.
+        self._sends: dict[str, list[float]] = {}
+        #: Delivery futures by task id, and task ids a caller or the owner canceled.
+        self._inflight: dict[str, asyncio.Future] = {}
+        self._canceled: set[str] = set()
+        self._background: set[asyncio.Future] = set()
 
     def _audit(self, op: str, outcome: str, **fields: Any) -> None:
         self.store.audit({"op": op, "outcome": outcome, **fields})
@@ -493,8 +534,39 @@ class A2AService:
             self.store.write_context(ctx, data)
 
     async def send(self, caller: str, caller_label: str, target: str, text: str, ctx: str = "",
-                   timeout: Optional[float] = None, run_id: str = "", orch_size: int = 0) -> dict:
-        """One SendMessage from *caller* (already authenticated by the host) to *target*."""
+                   timeout: Optional[float] = None, run_id: str = "", orch_size: int = 0,
+                   return_immediately: bool = False) -> dict:
+        """One SendMessage from *caller* (already authenticated by the host) to *target*.
+
+        With *return_immediately* (A2A ``configuration.returnImmediately``) every check
+        runs first, then a ``WORKING`` task comes back at once and the turn continues in
+        the background; the caller reads the outcome with ``tasks/get``.
+        """
+        if not return_immediately:
+            return await self._send(caller, caller_label, target, text, ctx, timeout, run_id, orch_size)
+        ready: asyncio.Future = asyncio.get_running_loop().create_future()
+        job = asyncio.ensure_future(self._send(caller, caller_label, target, text, ctx, timeout, run_id,
+                                               orch_size, ready=ready))
+        self._background.add(job)
+        job.add_done_callback(self._background.discard)
+        done, _ = await asyncio.wait({job, ready}, return_when=asyncio.FIRST_COMPLETED)
+        if ready in done:
+            return ready.result()
+        return job.result()  # refused or finished before delivery started: the real answer
+
+    def _rate_ok(self, caller: str, policy: Policy) -> bool:
+        now = time.monotonic()
+        recent = [t for t in self._sends.get(caller, []) if now - t < policy.rate_window]
+        if len(recent) >= policy.rate_sends:
+            self._sends[caller] = recent
+            return False
+        recent.append(now)
+        self._sends[caller] = recent
+        return True
+
+    async def _send(self, caller: str, caller_label: str, target: str, text: str, ctx: str = "",
+                    timeout: Optional[float] = None, run_id: str = "", orch_size: int = 0,
+                    ready: Optional[asyncio.Future] = None) -> dict:
         task_id = new_id()
         policy = self.store.policy()
         if not policy.permits(caller, target):
@@ -521,6 +593,11 @@ class A2AService:
                 return {k: v for k, v in old.items() if not k.startswith("_")}
             return make_task(task_id, ctx, STATE_REJECTED,
                              f"Rejected: the same message to {target_name} is already open. Wait for it.")
+        if not self._rate_ok(caller, policy):
+            self._audit("send", "denied", caller=caller, target=target,
+                        reason=f"rate_limit {policy.rate_sends}/{policy.rate_window}s")
+            raise A2AError(INTERNAL_ERROR, f"rate limit: at most {policy.rate_sends} sends per "
+                           f"{policy.rate_window // 60} minutes; try again later", "RATE_LIMITED")
         self._recent[dedup_key] = (time.monotonic(), task_id)
         lock = self._locks.setdefault(ctx, asyncio.Lock())
         if lock.locked():
@@ -537,26 +614,37 @@ class A2AService:
                             reason=f"loop_cap {cap.turns}/{cap.max}")
                 task = make_task(task_id, ctx, STATE_REJECTED,
                                  f"Rejected: this context reached its limit of {cap.max} turns. Start a new context.")
-                self.store.save_task({**task, "_caller": caller})
+                self.store.save_task({**task, "_caller": caller, "_target": target})
                 return task
             safe_in = self._scrub(text)
             framed = frame_inbound(caller_label, ctx, turn, policy.max_turns, safe_in, self.gw.neutralize)
             self.store.append_conversation(ctx, "user", caller, safe_in, task_id)
             self._audit("send", "delivering", caller=caller, target=target, context=ctx, turn=turn, run=run_id,
                         task=task_id, chars=len(safe_in))
+            working = make_task(task_id, ctx, STATE_WORKING, f"Asking {target_name}...")
+            self.store.save_task({**working, "_caller": caller, "_target": target})
+            if ready is not None and not ready.done():
+                ready.set_result(working)
+            delivery = asyncio.ensure_future(self.gw.deliver(
+                target, framed, banner_for(caller_label, turn, policy.max_turns, orch_size, run_id)))
+            self._inflight[task_id] = delivery
             try:
                 self._answering[target] = self._answering.get(target, 0) + 1
                 try:
-                    reply = await asyncio.wait_for(self.gw.deliver(target, framed, banner_for(caller_label, turn, policy.max_turns, orch_size, run_id)),
-                                                   timeout=min(self.gw.timeout_secs, timeout or self.gw.timeout_secs))
+                    reply = await asyncio.wait_for(delivery, timeout=min(self.gw.timeout_secs, timeout or self.gw.timeout_secs))
                 finally:
+                    self._inflight.pop(task_id, None)
                     self._answering[target] -= 1
                     if not self._answering[target]:
                         del self._answering[target]
+            except asyncio.CancelledError:
+                if task_id not in self._canceled:
+                    raise
+                return self.get_task(caller, task_id)  # cancel() already stored and audited it
             except asyncio.TimeoutError:
                 task = make_task(task_id, ctx, STATE_FAILED, f"{target_name} did not answer in time.")
                 self._audit("send", "timeout", caller=caller, target=target, context=ctx, task=task_id)
-                self.store.save_task({**task, "_caller": caller})
+                self.store.save_task({**task, "_caller": caller, "_target": target})
                 return task
             except Queued as q:
                 # Delivered, but behind the target's running turn; its answer lands in
@@ -566,14 +654,14 @@ class A2AService:
                                  f"answer in its own chat. The reply cannot be returned here.")
                 self._audit("send", "queued", caller=caller, target=target, context=ctx, task=task_id,
                             queue_id=q.queue_id)
-                self.store.save_task({**task, "_caller": caller})
+                self.store.save_task({**task, "_caller": caller, "_target": target})
                 return task
             except Busy:
                 self._release_turn(ctx)
                 task = make_task(task_id, ctx, STATE_REJECTED,
                                  f"{target_name} stayed busy, so nothing was sent. Try again later.")
                 self._audit("send", "busy", caller=caller, target=target, context=ctx, task=task_id)
-                self.store.save_task({**task, "_caller": caller})
+                self.store.save_task({**task, "_caller": caller, "_target": target})
                 return task
             except A2AError as err:
                 # The gateway refused the send (no thread, no token): nothing reached the
@@ -583,17 +671,22 @@ class A2AService:
                 self._recent.pop(dedup_key, None)
                 self._audit("send", "error", caller=caller, target=target, context=ctx, task=task_id,
                             error=err.message[:200])
+                # The WORKING task saved above must not outlive the refusal.
+                failed = make_task(task_id, ctx, STATE_FAILED, err.message)
+                self.store.save_task({**failed, "_caller": caller, "_target": target})
                 raise
             except Exception as exc:  # noqa: BLE001
                 task = make_task(task_id, ctx, STATE_FAILED, f"Delivery to {target_name} failed: {type(exc).__name__}")
                 self._audit("send", "error", caller=caller, target=target, context=ctx, task=task_id,
                             error=str(exc)[:200])
-                self.store.save_task({**task, "_caller": caller})
+                self.store.save_task({**task, "_caller": caller, "_target": target})
                 return task
+            if task_id in self._canceled:
+                return self.get_task(caller, task_id)  # canceled while the answer was arriving: drop it
             safe_out = self._scrub((reply or "").strip()[:MAX_REPLY_CHARS]) or "(no text reply)"
             self.store.append_conversation(ctx, "agent", target, safe_out, task_id)
             task = make_task(task_id, ctx, STATE_COMPLETED, safe_out)
-            self.store.save_task({**task, "_caller": caller})
+            self.store.save_task({**task, "_caller": caller, "_target": target})
             self._audit("send", "completed", caller=caller, target=target, context=ctx, task=task_id,
                         chars=len(safe_out))
             return task
@@ -613,9 +706,10 @@ class A2AService:
             raise A2AError(UNAUTHORIZED, "a Bot answering a peer message may not start an orchestration")
         wanted = list(dict.fromkeys(t for t in (targets or []) if isinstance(t, str)))
         if wanted == [ALL_BOTS]:
-            # Every Bot this caller may ask that still exists, in a stable order.
+            # Every roster Bot this caller may ask that still exists, in a stable order.
+            # Policy entries off the roster (mate, app agents) neither join nor count.
             wanted = sorted(t for t in policy.allow.get(caller, frozenset())
-                            if t != caller and self.gw.resolve_target(t))
+                            if t != caller and self.gw.resolve_target(t) and self.gw.is_roster(t))
             if not wanted:
                 raise A2AError(UNAUTHORIZED, "the owner's a2a policy lets you ask no Bot")
         if not wanted:
@@ -668,10 +762,59 @@ class A2AService:
         return {"run_id": run_id, "results": results}
 
     def get_task(self, caller: str, task_id: str) -> dict:
-        task = self.store.load_task(task_id)
+        task = self.store.load_task(task_id) if is_id(task_id) else None
         if not task or task.get("_caller") != caller:
             raise A2AError(TASK_NOT_FOUND, "task not found")
         return {k: v for k, v in task.items() if not k.startswith("_")}
+
+    def cancel_task(self, caller: str, task_id: str, *, as_owner: bool = False) -> dict:
+        """Cancel *caller*'s open task (or any open task, *as_owner*).
+
+        a2a stops waiting, drops any answer that still arrives and gives the turn back.
+        It cannot stop the asked Bot's own turn: an app may not interrupt a Bot's
+        thread, so that Bot may still finish its reply in its own chat.
+        """
+        task = self.store.load_task(task_id) if is_id(task_id) else None
+        if not task or (not as_owner and task.get("_caller") != caller):
+            raise A2AError(TASK_NOT_FOUND, "task not found")
+        state = (task.get("status") or {}).get("state")
+        if state in TERMINAL_STATES:
+            raise A2AError(TASK_NOT_CANCELABLE, f"task is already {str(state).replace('TASK_STATE_', '').lower()}",
+                           "TASK_NOT_CANCELABLE")
+        self._canceled.add(task_id)
+        ctx = task.get("contextId") or ""
+        canceled = make_task(task_id, ctx, STATE_CANCELED,
+                             "Canceled. a2a stopped waiting; the asked Bot may still finish its reply in its own chat.")
+        self.store.save_task({**canceled, **{k: v for k, v in task.items() if k.startswith("_")}})
+        if ctx and is_id(ctx):
+            self._release_turn(ctx)
+        fut = self._inflight.get(task_id)
+        if fut is not None and not fut.done():
+            fut.cancel()
+        self._audit("send", "canceled", caller=task.get("_caller"), target=task.get("_target"), context=ctx,
+                    task=task_id, by="owner" if as_owner else caller)
+        return {k: v for k, v in canceled.items() if not k.startswith("_")}
+
+    def list_tasks(self, caller: str, context_id: str = "", state: str = "", limit: int = 50,
+                   *, as_owner: bool = False, bot: str = "") -> list[dict]:
+        """*caller*'s tasks, newest first; *as_owner* sees every task (*bot* filters by party)."""
+        out = []
+        for task in self.store.tasks():
+            if not as_owner and task.get("_caller") != caller:
+                continue
+            if bot and bot not in (task.get("_caller"), task.get("_target")):
+                continue
+            if context_id and task.get("contextId") != context_id:
+                continue
+            if state and (task.get("status") or {}).get("state") != state:
+                continue
+            view = {k: v for k, v in task.items() if not k.startswith("_")}
+            if as_owner:
+                view["caller"], view["target"] = task.get("_caller"), task.get("_target")
+            out.append(view)
+            if len(out) >= max(1, min(limit, MAX_LIST_TASKS)):
+                break
+        return out
 
     def history(self, caller: str, ctx: str, limit: int = 50) -> list[dict]:
         data = self.store.read_context(ctx) if is_id(ctx) else None
@@ -686,9 +829,19 @@ class A2AService:
             req_id, method, params = parse_request(raw)
             if method in SEND_METHODS:
                 text, ctx = send_params(params)
-                return rpc_result(req_id, await self.send(caller, caller_label, target, text, ctx))
-            task_id = params.get("id") or params.get("name", "").rsplit("/", 1)[-1]
-            return rpc_result(req_id, self.get_task(caller, str(task_id)))
+                config = params.get("configuration") if isinstance(params.get("configuration"), dict) else {}
+                now = config.get("returnImmediately") is True or config.get("blocking") is False
+                return rpc_result(req_id, await self.send(caller, caller_label, target, text, ctx,
+                                                          return_immediately=now))
+            if method in LIST_METHODS:
+                limit = params.get("pageSize") if isinstance(params.get("pageSize"), int) else 50
+                tasks = self.list_tasks(caller, str(params.get("contextId") or ""),
+                                        str(params.get("status") or ""), limit)
+                return rpc_result(req_id, {"tasks": tasks, "nextPageToken": ""})
+            task_id = str(params.get("id") or str(params.get("name", "")).rsplit("/", 1)[-1])
+            if method in CANCEL_METHODS:
+                return rpc_result(req_id, self.cancel_task(caller, task_id))
+            return rpc_result(req_id, self.get_task(caller, task_id))
         except A2AError as err:
             return rpc_error(req_id, err.code, err.message, err.reason)
 
