@@ -151,6 +151,11 @@ def tool_list(args: dict, meta=None, root: Path = None) -> str:
     peers = ", ".join(res.get("peers") or []) or "none (ask your owner to allow one)"
     lines = [f"You are '{res.get('caller')}'. Bots you may message: {peers}. "
              f"Scope: {res.get('scope')}; at most {res.get('max_turns')} turns per context."]
+    remote = res.get("remote")
+    if remote:  # absent from a pre-0.7 dispatcher
+        ready = "" if res.get("fleet_ready") else (" (not reachable yet: this Kiro Crew has no peer seam, "
+                                                   "so these calls are refused)")
+        lines.append(f"Bots on your owner's other crews: {', '.join(remote)}{ready}.")
     if "chief_of_staff" in res:  # absent from a pre-0.6.1 dispatcher
         owner = res.get("owner_name")
         lines.append((f"Owner: {owner}. " if owner else "")
@@ -365,11 +370,13 @@ TOOLS = {
     "a2a_list": (tool_list, "List the Bots your owner's a2a policy lets you message, the limits, and your "
                  "Chief of Staff settings (whether you are it, whether it may assign, assign modes).", {}, []),
     "a2a_discover": (tool_discover, "Read another Bot's A2A Agent Card (name, description, skills).",
-                     {"agent": _s("The Bot id, e.g. researcher.")}, ["agent"]),
+                     {"agent": _s("The Bot id, e.g. researcher, or <crew>/<bot> on another crew.")}, ["agent"]),
     "a2a_call": (tool_call,
                  "Ask another Kiro Crew Bot a question. It answers in its own thread from its own memory "
-                 "and tools, in answer-only mode. Pass context_id from a reply to follow up.",
-                 {"agent": _s("The Bot id, e.g. researcher."), "message": _s("Your question, in plain language."),
+                 "and tools, in answer-only mode. Pass context_id from a reply to follow up. A Bot on "
+                 "another of your owner's crews is named <crew>/<bot>.",
+                 {"agent": _s("The Bot id, e.g. researcher, or <crew>/<bot> (e.g. dev/bob) on another crew."),
+                  "message": _s("Your question, in plain language."),
                   "context_id": _s("Optional: the context id of an earlier reply, to continue it.")},
                  ["agent", "message"]),
     "a2a_orchestrate": (tool_orchestrate,

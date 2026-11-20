@@ -5,6 +5,7 @@ import { filterItems, groupRows, reasonText } from '../ui/lib/feed.mjs'
 import { commit, forgetReview, prepare, reviewFor, verify, with503Retry } from '../ui/lib/apply.mjs'
 import { autoHeal, undoHeal } from '../ui/lib/heal.mjs'
 import { OPEN, STATUS_TONE, STATUS_WORD, ageText, effectiveMode, modeOptions, needsYoloConfirm, parseTerms } from '../ui/lib/cos.mjs'
+import { EMPTY_FLEET, addPair, fleetOf, outPairProblem, pairRows, removeCrew, removePair, setCrew, validPeerKey, validRemote } from '../ui/lib/fleet.mjs'
 
 const rows = [
   { ts: '2026-11-18T00:00:01Z', op: 'send', outcome: 'delivering', caller: 'assistant', target: 'researcher', context: 'c1', turn: 1 },
@@ -35,10 +36,12 @@ test('rows group into conversations, runs and events, newest first', () => {
 
 test('filters by Bot, outcome and op', () => {
   const items = groupRows(rows)
-  assert.deepEqual(filterItems(items, { outcome: 'refused' }).map(i => i.key), ['ctx:c1', 'row:2'])
-  assert.deepEqual(filterItems(items, { bot: 'writer' }).map(i => i.key), ['run:r1', 'row:2'])
-  assert.deepEqual(filterItems(items, { op: 'policy' }).map(i => i.key), ['row:10'])
-  assert.deepEqual(filterItems(items, { op: 'orchestrate' }).map(i => i.key), ['run:r1'])
+  // Pinned clock: the default 24h window would drop these fixture rows once they age.
+  const now = Date.parse('2026-11-18T01:00:00Z')
+  assert.deepEqual(filterItems(items, { outcome: 'refused' }, now).map(i => i.key), ['ctx:c1', 'row:2'])
+  assert.deepEqual(filterItems(items, { bot: 'writer' }, now).map(i => i.key), ['run:r1', 'row:2'])
+  assert.deepEqual(filterItems(items, { op: 'policy' }, now).map(i => i.key), ['row:10'])
+  assert.deepEqual(filterItems(items, { op: 'orchestrate' }, now).map(i => i.key), ['run:r1'])
 })
 
 test('reason words', () => {
@@ -401,4 +404,24 @@ test('a reply with no update and a timeout read as neither done nor open', () =>
   assert.equal(STATUS_WORD.no_reply, 'No reply')
   assert.notEqual(STATUS_TONE.replied, STATUS_TONE.done)
   assert.ok(!OPEN.has('replied') && !OPEN.has('no_reply'))
+})
+
+test('fleet: names, pairs, and removing a crew drops its outbound pairs', () => {
+  assert.ok(validRemote('dev/alice'))
+  for (const bad of ['alice', 'dev/', 'a/b/c', 'Dev/alice']) assert.ok(!validRemote(bad), bad)
+  assert.ok(validPeerKey('gw-hub-1/alice') && !validPeerKey('gw hub/alice'))
+  let f = fleetOf({})
+  assert.deepEqual(f, EMPTY_FLEET)
+  assert.match(outPairProblem(f, 'alice', 'dev/alice'), /Add the crew "dev" first/)
+  f = setCrew(f, 'dev', 'inst-dev')
+  assert.equal(outPairProblem(f, 'alice', 'dev/alice'), '')
+  f = addPair(f, 'allow_out', 'alice', 'dev/alice')
+  f = addPair(f, 'allow_out', 'alice', 'dev/alice')  // idempotent
+  f = addPair(f, 'allow_in', 'gw-hub-1/alice', 'alice')
+  assert.deepEqual(pairRows(f.allow_out), [{ key: 'alice', target: 'dev/alice' }])
+  assert.deepEqual(removePair(f, 'allow_in', 'gw-hub-1/alice', 'alice').allow_in, {})
+  const gone = removeCrew(f, 'dev')
+  assert.deepEqual(gone.crews, {})
+  assert.deepEqual(gone.allow_out, {})
+  assert.deepEqual(gone.allow_in, f.allow_in)  // inbound pairs are keyed by crew id, not alias
 })

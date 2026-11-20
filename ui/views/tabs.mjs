@@ -10,6 +10,7 @@ export const TABS = [
   ['limits', 'Limits', 'Gauge'],
   ['health', 'Health', 'HeartPulse'],
   ['cos', 'Chief of Staff', 'Crown'],
+  ['fleet', 'Fleet', 'Server'],
 ]
 
 export function tabFromUrl(fallback) {

@@ -23,6 +23,7 @@ from typing import Any, Optional
 from urllib.parse import urlsplit
 
 from .core import A2AError, A2AService, Busy, Gateway, Queued, Store, is_id, is_slug
+from .peers import is_remote
 
 logger = logging.getLogger("kirocrew.app.a2a")
 
@@ -359,6 +360,9 @@ def _gateway(ctx: Any) -> Gateway:
         neutralize=(untrusted.neutralize if untrusted else (lambda s: s)),
         flagged=(untrusted.flagged if untrusted else (lambda s: False)),
         audit=audit,
+        # The core's app peer SDK, when a Kiro Crew ships one (RFC "app peer calls").
+        # None on every release so far, and then every fleet call fails closed.
+        peers=getattr(ctx, "peers", None),
     )
 
 
@@ -421,8 +425,9 @@ async def _handle_entry(svc: A2AService, path: Path) -> None:
     try:
         if op == "call":
             target = str(entry.get("agent") or "").strip().lower()
-            task = await svc.send(caller, label, target, str(entry.get("message") or ""),
-                                  str(entry.get("context_id") or ""))
+            send = svc.send_remote if is_remote(target) else svc.send
+            task = await send(caller, label, target, str(entry.get("message") or ""),
+                              str(entry.get("context_id") or ""))
             _write_result(store, rid, {"ok": True, "task": task})
         elif op == "orchestrate":
             agents = entry.get("agents")
@@ -463,6 +468,9 @@ async def _handle_entry(svc: A2AService, path: Path) -> None:
             _write_result(store, rid, {"ok": True, "messages": rows})
         elif op == "list":
             _write_result(store, rid, {"ok": True, **svc.list_info(caller)})
+        elif op == "discover" and is_remote(str(entry.get("agent") or "")):
+            target = str(entry.get("agent") or "").strip().lower()
+            _write_result(store, rid, {"ok": True, "card": await svc.remote_card(caller, target)})
         elif op == "discover":
             target = str(entry.get("agent") or "").strip().lower()
             if not store.policy().permits(caller, target) or not bot_name(target):

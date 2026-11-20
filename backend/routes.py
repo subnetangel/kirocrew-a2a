@@ -20,6 +20,12 @@ assert who is calling.
 - ``GET  /setup``                          owner only: the one-click setup plan and
   each Bot's a2a health, read only. The page applies the plan with the owner's own
   session through the host's capability API; no route here writes a Bot's spec.
+- ``GET  /fleet``                          owner only (0.7): peer seam status, the
+  fleet policy and peer audit rows, for the page's Fleet tab.
+- ``GET  /peer/roster``, ``POST /peer/rpc/{slug}`` (0.7): another of the owner's crews
+  calling in. Admitted ONLY on the core's peer claim (``peers.verified_peer``); owner
+  and app tokens are refused here. No Kiro Crew sets that claim yet, so today both
+  routes refuse every request with "peer seam not available".
 """
 
 from __future__ import annotations
@@ -32,7 +38,7 @@ from typing import Any, Callable, Optional
 
 from aiohttp import web
 
-from . import hooks
+from . import hooks, peers
 from .core import INVALID_REQUEST, Policy, agent_card, rpc_error
 
 _MAX_BODY = 64 * 1024
@@ -152,8 +158,77 @@ async def get_audit(request: web.Request, ctx: Any) -> web.Response:
     return web.json_response({"rows": [json.loads(x) for x in lines[-limit:]]})
 
 
+# ------------------------------------------------------------------ fleet (0.7)
+
+
+def _peer_refusal(ctx: Any) -> web.Response:
+    """The /peer/* answer for any request without a core-verified peer claim."""
+    if peers.seam(getattr(ctx, "peers", None)) is None:
+        return web.json_response({"error": peers.SEAM_MESSAGE, "code": peers.SEAM_UNAVAILABLE.lower()}, status=403)
+    return web.json_response({"error": "a peer call needs the core's peer token", "code":
+                              peers.PEER_IDENTITY_REQUIRED.lower()}, status=403)
+
+
+async def get_peer_roster(request: web.Request, ctx: Any) -> web.Response:
+    """Remote side: the Agent Cards the verified hub's ``?caller=`` Bot may ask.
+
+    Owner and app tokens are refused here like anyone else: only the core's peer claim
+    names the hub. A caller the policy does not list gets an empty roster, not a 403.
+    """
+    gateway_id = peers.verified_peer(request, getattr(ctx, "peers", None))
+    if not gateway_id:
+        return _peer_refusal(ctx)
+    from .core import is_slug
+
+    caller = request.query.get("caller", "")
+    if not is_slug(caller):
+        return web.json_response({"agents": []})
+    slugs = await asyncio.to_thread(_svc().peer_roster, gateway_id, caller)
+    cards = []
+    for slug in slugs:
+        card = await asyncio.to_thread(card_for, slug)
+        cards.append({**card, "id": slug, "url": f"/api/apps/a2a/peer/rpc/{slug}"})
+    return web.json_response({"agents": cards})
+
+
+async def post_peer_rpc(request: web.Request, ctx: Any) -> web.Response:
+    """Remote side: JSON-RPC from a verified hub to one local Bot, answer-only."""
+    gateway_id = peers.verified_peer(request, getattr(ctx, "peers", None))
+    if not gateway_id:
+        return _peer_refusal(ctx)
+    if (request.content_length or 0) > _MAX_BODY:
+        return web.json_response(rpc_error(None, INVALID_REQUEST, "request too large"), status=413)
+    raw = await request.read()
+    if len(raw) > _MAX_BODY:
+        return web.json_response(rpc_error(None, INVALID_REQUEST, "request too large"), status=413)
+    return web.json_response(await _svc().handle_peer_rpc(gateway_id, request.match_info.get("slug", ""), raw))
+
+
+def fleet_view(svc: Any, audit_rows: list) -> dict:
+    """The page's Fleet section: whether the seam exists, the fleet policy, peer rows."""
+    seam = peers.seam(svc.gw.peers)
+    return {
+        "seam": seam is not None,
+        "seam_message": "" if seam is not None else peers.SEAM_MESSAGE,
+        "gateway_id": str(getattr(seam, "gateway_id", "") or "") if seam is not None else "",
+        "fleet": svc.store.policy().fleet,
+        "rows": [r for r in audit_rows if r.get("op") in ("peer_send", "peer_receive")][-100:],
+    }
+
+
+async def get_fleet(request: web.Request, ctx: Any) -> web.Response:
+    denied = await _owner_only(request, ctx, "a2a.fleet")
+    if denied is not None:
+        return denied
+    rows = await asyncio.to_thread(_audit_tail)
+    return web.json_response(fleet_view(_svc(), rows))
+
+
 def register_routes(ctx: Any) -> list[Route]:
     return [
+        Route("GET", "/peer/roster", get_peer_roster),
+        Route("POST", "/peer/rpc/{slug}", post_peer_rpc),
+        Route("GET", "/fleet", get_fleet),
         Route("GET", "/agents/{slug}/agent-card.json", get_card),
         Route("POST", "/agents/{slug}/rpc", post_rpc),
         Route("GET", "/policy", get_policy),

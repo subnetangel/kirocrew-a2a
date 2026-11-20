@@ -13,6 +13,7 @@ import Confirm from './views/confirm.mjs'
 import Health from './views/health.mjs'
 import Limits from './views/limits.mjs'
 import ChiefOfStaff from './views/cos.mjs'
+import Fleet from './views/fleet.mjs'
 import Setup, { setupState } from './views/setup.mjs'
 import { TabList, TabPanel, tabFromUrl, writeTab } from './views/tabs.mjs'
 import { removeAgent } from './lib/matrix.mjs'
@@ -226,6 +227,8 @@ export default function A2APage() {
       saveBar),
     h(TabPanel, { id: 'cos', tab },
       h(ChiefOfStaff, { client, draft, setDraft, saved, name, saveBar })),
+    h(TabPanel, { id: 'fleet', tab },
+      h(Fleet, { client, draft, setDraft, bots, saveBar, now })),
     h(TabPanel, { id: 'health', tab },
       setup ? h(Health, { setup, grants, onRepair: repair, onOpenBot: openBot })
         : setupErr ? null : h(Skeleton, { rows: 3, label: 'Checking each Bot' })),

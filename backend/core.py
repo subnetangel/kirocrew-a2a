@@ -18,11 +18,11 @@ import re
 import secrets
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-from . import cos
+from . import cos, peers
 
 PROTOCOL_VERSION = "1.0"
 
@@ -156,6 +156,8 @@ class Policy:
     #: Bot id -> False for a Bot the owner opted out of assignments. Absent means it accepts.
     accepts_assignments: dict = field(default_factory=dict)
     max_open_assignments: int = cos.DEFAULT_MAX_OPEN
+    #: Fleet (0.7): other crews of the same owner. See ``peers.clean_fleet``.
+    fleet: dict = field(default_factory=lambda: peers.clean_fleet({}))
 
     @classmethod
     def from_dict(cls, data: Any) -> "Policy":
@@ -167,6 +169,8 @@ class Policy:
             for caller, targets in raw.items():
                 if not isinstance(caller, str) or not isinstance(targets, list):
                     continue
+                if caller.startswith(peers.PEER_PREFIX):
+                    continue  # a peer identity is granted only through fleet.allow_in
                 allow[caller] = frozenset(t for t in targets if is_slug(t) and t != caller)
         turns = data.get("max_turns_per_context", DEFAULT_MAX_TURNS)
         if not isinstance(turns, int) or isinstance(turns, bool):
@@ -179,6 +183,7 @@ class Policy:
         by_bot = data.get("assign_mode_by_bot") if isinstance(data.get("assign_mode_by_bot"), dict) else {}
         accepts = data.get("accepts_assignments") if isinstance(data.get("accepts_assignments"), dict) else {}
         return cls(allow=allow, max_turns=min(turns, HARD_MAX_TURNS), scope=scope,
+                   fleet=peers.clean_fleet(data.get("fleet")),
                    chief_of_staff=chief if is_slug(chief) else "",
                    fanout_others=cos.bounded(data.get("fanout_others"), cos.DEFAULT_FANOUT_OTHERS, 1,
                                              cos.HARD_FANOUT_OTHERS),
@@ -209,6 +214,8 @@ class Policy:
         # An unknown scope fails closed: this build only knows answer-only.
         if self.scope != SCOPE_ANSWER_ONLY:
             return False
+        if caller.startswith(peers.PEER_PREFIX):
+            return peers.permits_in(self.fleet, caller, target)
         return bool(caller) and target in self.allow.get(caller, frozenset())
 
     def uses_yolo(self) -> bool:
@@ -235,6 +242,7 @@ class Policy:
             "assign_mode_by_bot": dict(sorted(self.assign_mode_by_bot.items())),
             "accepts_assignments": dict(sorted(self.accepts_assignments.items())),
             "max_open_assignments": self.max_open_assignments,
+            "fleet": self.fleet,
             "allow": {k: sorted(v) for k, v in sorted(self.allow.items())},
         }
 
@@ -532,6 +540,9 @@ class Gateway:
     #: The host's approval ceiling for a mode. Default: only ``normal`` (fail closed).
     mode_permitted: Callable[[str], bool] = lambda mode: mode == "normal"
     timeout_secs: float = 600.0  # idle wait (up to 240 s) plus the turn itself
+    #: The core's peer SDK (``ctx.peers``), or None: no Kiro Crew ships one yet, so fleet
+    #: calls fail closed (``peers.seam``).
+    peers: Any = None
 
 
 class A2AService:
@@ -591,18 +602,20 @@ class A2AService:
 
     async def send(self, caller: str, caller_label: str, target: str, text: str, ctx: str = "",
                    timeout: Optional[float] = None, run_id: str = "", orch_size: int = 0,
-                   return_immediately: bool = False) -> dict:
+                   return_immediately: bool = False, max_turns: int = 0) -> dict:
         """One SendMessage from *caller* (already authenticated by the host) to *target*.
 
         With *return_immediately* (A2A ``configuration.returnImmediately``) every check
         runs first, then a ``WORKING`` task comes back at once and the turn continues in
-        the background; the caller reads the outcome with ``tasks/get``.
+        the background; the caller reads the outcome with ``tasks/get``. *max_turns*
+        (fleet calls) can only lower the policy's turn cap, never raise it.
         """
         if not return_immediately:
-            return await self._send(caller, caller_label, target, text, ctx, timeout, run_id, orch_size)
+            return await self._send(caller, caller_label, target, text, ctx, timeout, run_id, orch_size,
+                                    max_turns=max_turns)
         ready: asyncio.Future = asyncio.get_running_loop().create_future()
         job = asyncio.ensure_future(self._send(caller, caller_label, target, text, ctx, timeout, run_id,
-                                               orch_size, ready=ready))
+                                               orch_size, ready=ready, max_turns=max_turns))
         self._background.add(job)
         job.add_done_callback(self._background.discard)
         done, _ = await asyncio.wait({job, ready}, return_when=asyncio.FIRST_COMPLETED)
@@ -622,9 +635,11 @@ class A2AService:
 
     async def _send(self, caller: str, caller_label: str, target: str, text: str, ctx: str = "",
                     timeout: Optional[float] = None, run_id: str = "", orch_size: int = 0,
-                    ready: Optional[asyncio.Future] = None) -> dict:
+                    ready: Optional[asyncio.Future] = None, max_turns: int = 0) -> dict:
         task_id = new_id()
         policy = self.store.policy()
+        if max_turns:
+            policy = replace(policy, max_turns=max(1, min(policy.max_turns, max_turns)))
         if not policy.permits(caller, target):
             self._audit("send", "denied", caller=caller, target=target, reason="policy")
             raise A2AError(UNAUTHORIZED, "not permitted by the owner's a2a policy")
@@ -784,6 +799,16 @@ class A2AService:
                 raise A2AError(UNAUTHORIZED, "the owner's a2a policy lets you ask no Bot")
         if not wanted:
             raise A2AError(INVALID_PARAMS, "name at least one Bot in 'agents'")
+        remote = [t for t in wanted if peers.is_remote(t)]
+        if remote:
+            # 0.7 fans out on this crew only; another crew is asked one Bot at a time.
+            seam_missing = not self.fleet_ready()
+            self._audit("orchestrate", "denied", caller=caller, run=run_id, targets=",".join(remote)[:200],
+                        reason="peer_seam_unavailable" if seam_missing else "remote_target")
+            if seam_missing:
+                raise A2AError(UNAUTHORIZED, peers.SEAM_MESSAGE, peers.SEAM_UNAVAILABLE)
+            raise A2AError(INVALID_PARAMS, "a2a_orchestrate asks Bots on this crew only; ask a Bot on "
+                           "another crew with a2a_call")
         limit = HARD_ORCH_TARGETS if rollcall else policy.orch_targets
         if len(wanted) > limit:
             # Never trim silently: the caller learns the cap and decides what to drop.
@@ -943,7 +968,9 @@ class A2AService:
         peers = sorted(policy.allow.get(caller, ()))
         is_chief = bool(policy.chief_of_staff) and caller == policy.chief_of_staff
         out = {"caller": caller, "peers": peers, "max_turns": policy.max_turns, "scope": policy.scope,
-               "chief_of_staff": is_chief, "cos_can_assign": policy.cos_can_assign}
+               "chief_of_staff": is_chief, "cos_can_assign": policy.cos_can_assign,
+               "remote": list(policy.fleet.get("allow_out", {}).get(caller, [])),
+               "fleet_ready": self.fleet_ready()}
         if is_chief or self.gw.is_roster(caller):
             out["owner_name"] = policy.owner_name
         if is_chief:
@@ -1257,6 +1284,179 @@ class A2AService:
         if not data or caller not in (data.get("pair") or []):
             return []
         return self.store.conversation(ctx, limit=max(1, min(limit, 200)))
+
+    # ------------------------------------------------------------------ fleet (0.7)
+
+    def fleet_ready(self) -> bool:
+        """Whether this Kiro Crew has the core peer seam. False on every release so far."""
+        return peers.seam(self.gw.peers) is not None
+
+    def _remote_refusal(self, caller: str, name: str, reason: str, code: int, message: str,
+                        err_reason: str = "") -> A2AError:
+        self._audit("peer_send", "denied", caller=caller, target=str(name)[:80], reason=reason)
+        return A2AError(code, message, err_reason)
+
+    def _remote_ready(self, caller: str, name: str) -> tuple[Any, str, str, Policy]:
+        """``(seam, instance id, slug, policy)`` for a call from *caller* to *name*, or raise.
+
+        The seam check comes first, so with no core seam every peer call gets the same
+        "peer seam not available" answer and nothing about the policy is revealed.
+        """
+        split = peers.split_remote(name)
+        if split is None:
+            raise self._remote_refusal(caller, name, "bad_name", INVALID_PARAMS,
+                                       "a Bot on another crew is named <crew>/<bot>, e.g. dev/bob")
+        seam = peers.seam(self.gw.peers)
+        if seam is None:
+            raise self._remote_refusal(caller, name, "peer_seam_unavailable", UNAUTHORIZED,
+                                       peers.SEAM_MESSAGE, peers.SEAM_UNAVAILABLE)
+        if self._answering.get(caller):
+            # Depth 1: a Bot answering any peer message never starts a call of its own.
+            raise self._remote_refusal(caller, name, "inside_peer_message", UNAUTHORIZED,
+                                       "a Bot answering a peer message may not start a call of its own")
+        policy = self.store.policy()
+        if policy.scope != SCOPE_ANSWER_ONLY or not peers.permits_out(policy.fleet, caller, name):
+            raise self._remote_refusal(caller, name, "policy", UNAUTHORIZED,
+                                       "not permitted by the owner's a2a policy")
+        return seam, policy.fleet["crews"][split[0]], split[1], policy
+
+    async def _peer_request(self, seam: Any, instance: str, method: str, subpath: str,
+                            body: Optional[dict] = None, params: Optional[dict] = None) -> Any:
+        """One call through the core seam. Returns the reply body; raises on a refusal."""
+        res = await asyncio.wait_for(seam.request(instance, method, subpath, json=body, params=params,
+                                                  timeout=self.gw.timeout_secs),
+                                     timeout=self.gw.timeout_secs + 5)
+        status = res.get("status") if isinstance(res, dict) else None
+        reply = res.get("body") if isinstance(res, dict) else None
+        if status != 200:
+            detail = reply.get("error") if isinstance(reply, dict) else ""
+            raise A2AError(UNAUTHORIZED, f"the other crew refused ({status}): {str(detail or '')[:200]}",
+                           "PEER_REFUSED")
+        return reply
+
+    async def send_remote(self, caller: str, caller_label: str, name: str, text: str, ctx: str = "") -> dict:
+        """Hub side: local Bot *caller* asks ``<crew>/<slug>`` on another of the owner's crews.
+
+        Order, each refusal audited: the core seam (none ships yet, so every call stops
+        there), depth 1, the hub's half of the policy pair, the injection screen, the
+        rate limit, the local turn cap. The remote applies its own half and its own cap,
+        and the smaller cap wins. Text is scrubbed both ways.
+        """
+        seam, instance, slug, policy = self._remote_ready(caller, name)
+        if self.gw.flagged(text):
+            raise self._remote_refusal(caller, name, "injection_screen", INVALID_PARAMS,
+                                       "message failed the host's prompt-injection screen",
+                                       "MESSAGE_REFUSED_BY_SCREEN")
+        if not self._rate_ok(caller, policy):
+            raise self._remote_refusal(caller, name, f"rate_limit {policy.rate_sends}/{policy.rate_window}s",
+                                       INTERNAL_ERROR, "rate limit reached; try again later", "RATE_LIMITED")
+        cap = peers.effective_cap(policy.max_turns, policy.fleet.get("max_turns"), 0)
+        capped = replace(policy, max_turns=cap)
+        ctx = ctx or new_id()
+        task_id = new_id()
+        lock = self._locks.setdefault(ctx, asyncio.Lock())
+        if lock.locked():
+            self._audit("peer_send", "rejected", caller=caller, target=name, context=ctx, reason="context_busy")
+            return make_task(task_id, ctx, STATE_REJECTED,
+                             "Rejected: a turn on this context is still open. Answer it before sending another.")
+        async with lock:
+            try:
+                turn = self._claim_turn(ctx, caller, name, capped)
+            except _LoopCap as lc:
+                self._audit("peer_send", "rejected", caller=caller, target=name, context=ctx,
+                            reason=f"loop_cap {lc.turns}/{lc.max}")
+                return make_task(task_id, ctx, STATE_REJECTED,
+                                 f"Rejected: this context reached its limit of {lc.max} turns. Start a new context.")
+            safe_in = self._scrub(text)
+            self.store.append_conversation(ctx, "user", caller, safe_in, task_id)
+            body = {"jsonrpc": "2.0", "id": task_id, "method": "message/send",
+                    "params": {"message": text_message(ROLE_USER, safe_in, ctx),
+                               "metadata": {peers.META_KEY: {"caller": caller, "max_turns": cap}}}}
+            self._audit("peer_send", "delivering", caller=caller, target=name, context=ctx, turn=turn,
+                        task=task_id, chars=len(safe_in))
+            try:
+                reply = await self._peer_request(seam, instance, "POST", f"rpc/{slug}", body)
+            except A2AError as err:
+                self._release_turn(ctx)
+                self._audit("peer_send", "error", caller=caller, target=name, context=ctx, task=task_id,
+                            error=err.message[:200])
+                raise
+            except Exception as exc:  # noqa: BLE001 -- the tunnel or the remote failed
+                self._release_turn(ctx)
+                self._audit("peer_send", "error", caller=caller, target=name, context=ctx, task=task_id,
+                            error=type(exc).__name__)
+                task = make_task(task_id, ctx, STATE_FAILED, f"Could not reach {name}: {type(exc).__name__}")
+                self.store.save_task({**task, "_caller": caller, "_target": name})
+                return task
+            remote = reply.get("result") if isinstance(reply, dict) else None
+            if not isinstance(remote, dict):
+                err = (reply.get("error") or {}) if isinstance(reply, dict) else {}
+                message = str(err.get("message") or "no answer")[:300] if isinstance(err, dict) else "no answer"
+                self._audit("peer_send", "refused", caller=caller, target=name, context=ctx, task=task_id,
+                            error=message[:200])
+                task = make_task(task_id, ctx, STATE_REJECTED, f"{name} refused: {self._scrub(message)}")
+                self.store.save_task({**task, "_caller": caller, "_target": name})
+                return task
+            status = remote.get("status") if isinstance(remote.get("status"), dict) else {}
+            state = status.get("state") if status.get("state") in TERMINAL_STATES | {STATE_WORKING} else STATE_FAILED
+            parts = ((remote.get("artifacts") or [{}])[0].get("parts") if remote.get("artifacts")
+                     else (status.get("message") or {}).get("parts")) or []
+            raw_text = "\n".join(p.get("text", "") for p in parts if isinstance(p, dict) and isinstance(p.get("text"), str))
+            safe_out = self._scrub(raw_text.strip()[:MAX_REPLY_CHARS]) or "(no text reply)"
+            self.store.append_conversation(ctx, "agent", name, safe_out, task_id)
+            task = make_task(task_id, ctx, state, safe_out)
+            self.store.save_task({**task, "_caller": caller, "_target": name,
+                                  "_remote_task": str(remote.get("id") or "")[:64]})
+            self._audit("peer_send", state.replace("TASK_STATE_", "").lower(), caller=caller, target=name,
+                        context=ctx, task=task_id, chars=len(safe_out))
+            return task
+
+    async def remote_card(self, caller: str, name: str) -> dict:
+        """Hub side: the Agent Card of ``<crew>/<slug>``, from that crew's own roster."""
+        seam, instance, slug, _policy = self._remote_ready(caller, name)
+        reply = await self._peer_request(seam, instance, "GET", "roster", params={"caller": caller})
+        for card in (reply.get("agents") if isinstance(reply, dict) else None) or []:
+            if isinstance(card, dict) and card.get("id") == slug:
+                return card
+        raise A2AError(UNAUTHORIZED, "not permitted by the other crew's a2a policy")
+
+    def peer_roster(self, gateway_id: str, caller_slug: str) -> list[str]:
+        """Remote side: the local Bots the verified hub's *caller_slug* may ask."""
+        policy = self.store.policy()
+        caller = peers.peer_caller(gateway_id, caller_slug)
+        targets = policy.fleet.get("allow_in", {}).get(peers.peer_key(gateway_id, caller_slug), [])
+        return [t for t in targets if policy.permits(caller, t) and self.gw.resolve_target(t)]
+
+    async def handle_peer_rpc(self, gateway_id: str, target: str, raw: bytes | str) -> dict:
+        """Remote side: one JSON-RPC request from a verified hub, for local Bot *target*.
+
+        *gateway_id* comes from the core's token claim. The caller slug and the hub's
+        turn cap come from the body: they are the hub's claims, kept apart per hub as
+        ``peer:<gateway_id>/<slug>`` and admitted only through the owner's ``allow_in``.
+        Answer-only: SendMessage and GetTask, nothing else.
+        """
+        req_id = None
+        try:
+            req_id, method, params = parse_request(raw)
+            if method not in SEND_METHODS | GET_METHODS:
+                raise A2AError(METHOD_NOT_FOUND, "a peer crew may only send a message or read its task")
+            slug, hub_cap = peers.hub_claims(params)
+            if not slug:
+                self._audit("peer_receive", "denied", hub=gateway_id[:64], target=target, reason="no_caller")
+                raise A2AError(INVALID_PARAMS, "the request names no calling Bot")
+            caller = peers.peer_caller(gateway_id, slug)
+            if method in GET_METHODS:
+                task_id = str(params.get("id") or str(params.get("name", "")).rsplit("/", 1)[-1])
+                return rpc_result(req_id, self.get_task(caller, task_id))
+            text, ctx = send_params(params)
+            policy = self.store.policy()
+            cap = peers.effective_cap(policy.max_turns, policy.fleet.get("max_turns"), hub_cap)
+            self._audit("peer_receive", "accepted", hub=gateway_id[:64], caller=caller, target=target,
+                        context=ctx, cap=cap)
+            label = f"{slug} on your crew {gateway_id[:24]}"
+            return rpc_result(req_id, await self.send(caller, label, target, text, ctx, max_turns=cap))
+        except A2AError as err:
+            return rpc_error(req_id, err.code, err.message, err.reason)
 
     async def handle_rpc(self, caller: str, caller_label: str, target: str, raw: bytes | str) -> dict:
         """One JSON-RPC request addressed to *target*'s endpoint, from an authenticated *caller*."""

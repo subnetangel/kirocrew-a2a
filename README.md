@@ -183,6 +183,42 @@ Every new setting starts off or at its most cautious value:
 - After updating, reload each Bot's chat so it gets the current a2a tools.
 - Permissions are unchanged from 0.6.0.
 
+## Changes in 0.7.0
+
+- New **Fleet** tab and `<crew>/<bot>` names for Bots on your other crews.
+  **Fleet is off:** it needs Kiro Crew app peer calls
+  ([#40040](https://github.com/kirodotdev/KiroCrew/issues/40040)), and until a
+  release ships them every peer call is refused and nothing is sent. You can
+  set up crews and pairs ahead of time.
+- A page test no longer fails once its fixture dates are more than a day old.
+- Permissions are unchanged from 0.6.1.
+
+## Fleet (0.7): your other crews
+
+A Bot can ask a Bot on another of **your own** Kiro Crews, named `<crew>/<bot>`
+(for example `dev/alice`). This needs a core capability no Kiro Crew release has
+yet ("app peer calls": `ctx.peers` and a peer token over the Remote Crew tunnel;
+requested in [kirodotdev/KiroCrew#40040](https://github.com/kirodotdev/KiroCrew/issues/40040)).
+**Fleet is off in 0.7.0: until a Kiro Crew ships app peer calls, every peer call
+is refused with "peer seam not available" and nothing is sent.** The Fleet tab
+says so.
+
+- **Policy pairs on both ends.** On the crew that asks, the Fleet tab maps a crew
+  name to a Remote Crew instance and lists `my Bot -> <crew>/<bot>`. On the crew
+  that answers, it lists `<asking crew's id>/<bot> -> my Bot`. Both must agree.
+- **Identity.** The answering crew learns which crew is calling only from the
+  core's token claim, never from the request body. The Bot name after the slash is
+  the asking crew's word, kept separate per crew.
+- **Answer-only, one hop.** A peer turn is answer-only; a Bot answering one cannot
+  call any Bot, here or on a third crew. `a2a_orchestrate` asks Bots on this crew
+  only. The smaller turn cap of the two crews applies.
+- **No listener, no token of its own.** Peer calls ride Kiro Crew's own Remote
+  Crew tunnel through `ctx.peers`; a2a mints nothing.
+- Routes: `GET /api/apps/a2a/peer/roster`, `POST /api/apps/a2a/peer/rpc/{slug}`
+  (peer claim only; owner and app tokens are refused), `GET /api/apps/a2a/fleet`
+  (owner). 0.7.0 asks for no new permission; a later version will add
+  `permissions.peers` once Kiro Crew defines it.
+
 ## HTTP (A2A clients)
 
 - `GET /api/apps/a2a/agents/{slug}/agent-card.json`
