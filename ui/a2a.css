@@ -391,6 +391,8 @@
 .a2a-asg.is-unread { border-color: var(--a2a-accent); }
 .a2a-asg-head { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
 .a2a-asg-edit { display: grid; gap: 0.5rem; }
+.a2a-asg-targets { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+.a2a-asg-target { padding-top: 0.5rem; border-top: 1px solid var(--a2a-line); display: grid; gap: 0.25rem; }
 .a2a-asg-edit label { display: grid; gap: 0.25rem; font-weight: 600; }
 .a2a-brief { padding: 0.75rem 1rem; border: 1px solid var(--a2a-line); border-radius: var(--a2a-r-lg); background: var(--a2a-card); margin-top: 0.75rem; }
 .a2a-brief summary { cursor: pointer; font-weight: 600; color: var(--a2a-strong); }

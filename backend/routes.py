@@ -16,7 +16,9 @@ assert who is calling.
   Bot only through the gateway's own records (``hooks.caller_slug_for_session``).
 - ``GET  /chief-of-staff``, ``POST /inbox/{id}``, ``POST /assignments/{id}``: owner
   only, the Chief of Staff tab (0.6): roll-call briefs, the escalation inbox and the
-  assignment queue with Approve / Edit / Reject / Cancel.
+  assignment queue with Approve / Edit / Reject / Cancel, and (0.8) Resend for one
+  target of a broadcast that did not arrive. These are the only callers of the
+  approval actions: no Bot tool or app token reaches them.
 - ``GET  /setup``                          owner only: the one-click setup plan and
   each Bot's a2a health, read only. The page applies the plan with the owner's own
   session through the host's capability API; no route here writes a Bot's spec.

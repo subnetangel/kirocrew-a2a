@@ -370,6 +370,8 @@ def _defang(text: str, neutralize: Callable[[str], str]) -> str:
     text = neutralize(text)
     for marker in (_FENCE_OPEN, _FENCE_CLOSE, _HEADER, _FOOTER):
         text = text.replace(marker, "[filtered]")
+    # 0.8: nor an assignment, standing-instruction or owner-approval marker.
+    text = cos.defang(text, lambda s: s)
     lines = []
     for line in text.splitlines():
         lines.append(("\u200b" + line) if line.lstrip().startswith("/") else line)
@@ -1006,28 +1008,43 @@ class A2AService:
             raise A2AError(TASK_NOT_FOUND, "assignment not found")
         return a
 
-    async def assign(self, caller: str, caller_label: str, target: str, title: str, brief: str,
+    async def assign(self, caller: str, caller_label: str, target: Any, title: str, brief: str,
                      done_when: str, kind: str = "change") -> dict:
+        """One assignment, or (0.8) a broadcast: *target* a list of Bot ids or ``"all"``.
+        A broadcast is one row per target sharing a ``group`` id, shown and approved once."""
         policy = self.store.policy()
-        target = (target or "").strip().lower()
+        raw = target if isinstance(target, list) else [target]
+        wants_all = [str(t or "").strip().lower() for t in raw] == ["all"]
+        targets = list(dict.fromkeys(str(t or "").strip().lower() for t in raw if str(t or "").strip()))
+        shown = ",".join(targets)[:200]
 
         def deny(reason: str, message: str, code: int = UNAUTHORIZED) -> None:
-            self._audit("assign", "denied", caller=caller, target=target, reason=reason)
+            self._audit("assign", "denied", caller=caller, target=shown, reason=reason)
             raise A2AError(code, message)
 
         if not policy.cos_can_assign:
             deny("assign_off", "your owner has not let the Chief of Staff assign work")
         self._require_chief(caller, policy, "a2a_assign")
-        if target == caller:
-            deny("self", "the Chief of Staff cannot assign work to itself", INVALID_PARAMS)
-        if not is_slug(target) or not self.gw.resolve_target(target) or not self.gw.is_roster(target):
-            deny("unknown_target", f"unknown Bot '{target[:64]}'", INVALID_PARAMS)
-        if not policy.accepts(target):
-            deny("opted_out", f"your owner has set {target} not to accept assignments")
-        if not policy.permits(caller, target):
-            deny("policy", "not permitted by the owner's a2a policy")
+        if wants_all:
+            targets = sorted(t for t in self.gw.roster() if t != caller and is_slug(t) and self.gw.resolve_target(t)
+                             and self.gw.is_roster(t) and policy.accepts(t) and policy.permits(caller, t))
+            if not targets:
+                deny("no_targets", "there are no Bots that accept assignments from you", INVALID_PARAMS)
+        if not targets:
+            deny("unknown_target", "name a Bot, a list of Bots, or all", INVALID_PARAMS)
+        if len(targets) > cos.BROADCAST_MAX:
+            deny("broadcast_cap", f"at most {cos.BROADCAST_MAX} Bots per broadcast", INVALID_PARAMS)
+        for t in targets:
+            if t == caller:
+                deny("self", "the Chief of Staff cannot assign work to itself", INVALID_PARAMS)
+            if not is_slug(t) or not self.gw.resolve_target(t) or not self.gw.is_roster(t):
+                deny("unknown_target", f"unknown Bot '{t[:64]}'", INVALID_PARAMS)
+            if not policy.accepts(t):
+                deny("opted_out", f"your owner has set {t} not to accept assignments")
+            if not policy.permits(caller, t):
+                deny("policy", "not permitted by the owner's a2a policy")
         if kind not in cos.KINDS:
-            deny("kind", "kind must be read or change", INVALID_PARAMS)
+            deny("kind", "kind must be read, change or instruction", INVALID_PARAMS)
         try:
             fields = cos.check_caps({"title": title, "brief": brief, "done_when": done_when}, cos.ASSIGN_CAPS)
         except cos.CosError as err:
@@ -1039,35 +1056,58 @@ class A2AService:
             deny("injection_screen", "assignment failed the host's prompt-injection screen", INVALID_PARAMS)
         self.sweep_assignments()
         rows = self.cos.load("assignments")
-        open_n = sum(1 for a in rows if a.get("target") == target and a.get("status") in cos.OPEN_STATES)
-        if open_n >= policy.max_open_assignments:
-            deny("open_cap", f"{target} already has {open_n} open assignments (your owner's limit is "
-                 f"{policy.max_open_assignments}); wait for one to finish or cancel one", INVALID_PARAMS)
+        for t in targets:
+            open_n = sum(1 for a in rows if a.get("target") == t and a.get("status") in cos.OPEN_STATES)
+            if open_n >= policy.max_open_assignments:
+                deny("open_cap", f"{t} already has {open_n} open assignments (your owner's limit is "
+                     f"{policy.max_open_assignments}); wait for one to finish or cancel one", INVALID_PARAMS)
         self._rate(caller, policy, "assign")
         fields = {k: self._clean(v) for k, v in fields.items()}
-        mode = cos.effective_mode(policy.assign_mode_default, policy.assign_mode_by_bot, target,
-                                  self.gw.mode_permitted)
-        asg = cos.new_assignment(caller, target, fields, kind, mode, time.time())
-        asg["by_label"] = cos.label(caller_label, 40, caller)
-        rows.append(asg)
+        broadcast = wants_all or len(targets) > 1
+        group = "grp_" + cos._short_id() if broadcast else ""
+        made = []
+        for t in targets:
+            mode = cos.effective_mode(policy.assign_mode_default, policy.assign_mode_by_bot, t,
+                                      self.gw.mode_permitted)
+            asg = cos.new_assignment(caller, t, fields, kind, mode, time.time())
+            asg["by_label"] = cos.label(caller_label, 40, caller)
+            if broadcast:
+                asg.update(group=group, targets=targets, all=wants_all, unread=False)
+            made.append(asg)
+        rows.extend(made)
         self.cos.save("assignments", rows, cos.ASSIGN_KEEP)
-        queued = cos.routes_to_queue(mode, kind)
-        self._audit("assign", "queued" if queued else "auto", caller=caller, target=target, task=asg["id"],
-                    mode=mode, kind=kind)
+        first = made[0]
+        queued = cos.routes_to_queue(first["mode"], kind, broadcast)
+        # The "queued" / "auto" row is the proposal record.
+        self._audit("assign", "queued" if queued else "auto", caller=caller, target=shown, task=first["id"],
+                    mode=first["mode"], kind=kind, sha256=cos.text_sha256(first),
+                    **({"group": group, "targets": len(targets)} if broadcast else {}))
         if not queued:
-            self._send_assignment(asg["id"])
-        return cos.public_assignment(self._find_assignment(self.cos.load("assignments"), asg["id"]))
+            self._send_assignment(first["id"])
+        return cos.public_assignment(self._find_assignment(self.cos.load("assignments"), first["id"]))
+
+    def _group_rows(self, rows: list, asg: dict) -> list:
+        group = asg.get("group")
+        return [r for r in rows if group and r.get("group") == group] or [asg]
 
     def _send_assignment(self, asg_id: str) -> None:
         """Mark *asg_id* sent and deliver it in the background (a new turn in the target's thread)."""
         rows = self.cos.load("assignments")
         asg = self._find_assignment(rows, asg_id)
         policy = self.store.policy()
+        refusal = cos.delivery_refusal(asg)
+        if refusal:
+            cos.set_status(asg, cos.REFUSED, f"Not sent: {refusal}.", time.time(), "a2a")
+            self.cos.save("assignments", rows, cos.ASSIGN_KEEP)
+            self._audit("assign", "refused", caller=asg["by"], target=asg["target"], task=asg_id, reason=refusal)
+            return
         cos.set_status(asg, "sent", "", time.time(), "a2a")
         self.cos.save("assignments", rows, cos.ASSIGN_KEEP)
         framed = cos.frame_assignment(asg, asg.get("by_label") or asg["by"], policy.owner_name, self.gw.neutralize)
-        banner = cos.assignment_banner(asg.get("by_label") or asg["by"], policy.owner_name, asg.get("title", ""))
-        self._audit("assign", "sent", caller=asg["by"], target=asg["target"], task=asg_id, mode=asg.get("mode"))
+        banner = cos.assignment_banner(asg.get("by_label") or asg["by"], policy.owner_name, asg.get("title", ""),
+                                       asg.get("kind", ""))
+        self._audit("assign", "sent", caller=asg["by"], target=asg["target"], task=asg_id, mode=asg.get("mode"),
+                    approval=(asg.get("approval") or {}).get("id", "preauthorized"))
 
         async def go() -> None:
             note, source = "", ""
@@ -1078,6 +1118,7 @@ class A2AService:
                 # server older than the tool), its own reply is the status: the same reply
                 # a2a_call collects, scrubbed, defanged and capped, marked as a reply.
                 status, source = cos.REPLIED, "reply"
+                self._audit("assign", "delivered", caller=asg["by"], target=asg["target"], task=asg_id)
                 try:
                     note = cos.reply_note(self._scrub((reply or "").strip()[:MAX_REPLY_CHARS]), self.gw.neutralize)
                 except A2AError:  # redaction unavailable: record that it replied, never the raw text
@@ -1095,6 +1136,9 @@ class A2AService:
                 note, status = "Not delivered: the Bot stayed busy. Cancel and assign again later.", "blocked"
             except A2AError as err:
                 note, status = f"Not delivered: {err.message[:200]}", "blocked"
+                if "has no chat yet" in err.message:
+                    status = cos.NO_CHAT
+                    note += " Open its chat once, then press Resend."
             except Exception as exc:  # noqa: BLE001
                 note, status = f"Not delivered: {type(exc).__name__}", "blocked"
             finally:
@@ -1129,8 +1173,21 @@ class A2AService:
             return cos.public_assignment(asg)
         if action == "cancel":
             return self.cancel_assignment("owner", asg_id, as_owner=True)
+        policy = self.store.policy()
+        if action == "resend":
+            # One target of an approved (or pre-authorized) item that did not arrive.
+            if status not in cos.RESENDABLE:
+                raise A2AError(TASK_NOT_CANCELABLE, f"assignment is {status}; only a no-chat or blocked one is resent")
+            if not policy.cos_can_assign or not policy.accepts(asg["target"]):
+                raise A2AError(UNAUTHORIZED, "assignments are off, or this Bot no longer accepts them")
+            self._audit("assign", "resend", by="owner", task=asg_id, target=asg["target"])
+            self._send_assignment(asg_id)
+            return cos.public_assignment(self._find_assignment(self.cos.load("assignments"), asg_id))
         if status != "queued":
             raise A2AError(TASK_NOT_CANCELABLE, f"assignment is {status}, not waiting for approval")
+        # A broadcast is one decision: edit, reject and approve act on every queued row in it.
+        group = [r for r in self._group_rows(rows, asg) if r.get("status") == "queued"]
+        extra = {"group": asg["group"], "targets": len(group)} if asg.get("group") else {}
         if action == "edit":
             try:
                 fields = cos.check_caps({k: (edits or {}).get(k, asg.get(k, "")) for k in cos.ASSIGN_CAPS},
@@ -1139,24 +1196,32 @@ class A2AService:
                 raise A2AError(INVALID_PARAMS, err.message, err.reason) from None
             if not fields["title"] or not fields["brief"]:
                 raise A2AError(INVALID_PARAMS, "'title' and 'brief' are required")
-            asg.update({k: self._clean(v) for k, v in fields.items()})
-            cos.set_status(asg, "queued", "Edited by the owner.", now, "owner")
+            for r in group:
+                r.update({k: self._clean(v) for k, v in fields.items()})
+                cos.set_status(r, "queued", "Edited by the owner.", now, "owner")
             self.cos.save("assignments", rows, cos.ASSIGN_KEEP)
-            self._audit("assign", "edited", by="owner", task=asg_id, target=asg["target"])
+            self._audit("assign", "edited", by="owner", task=asg_id, target=asg["target"], **extra)
             return cos.public_assignment(asg)
         if action == "reject":
-            cos.set_status(asg, "rejected", "Rejected by the owner.", now, "owner")
+            for r in group:
+                cos.set_status(r, "rejected", "Rejected by the owner.", now, "owner")
             self.cos.save("assignments", rows, cos.ASSIGN_KEEP)
-            self._audit("assign", "rejected", by="owner", task=asg_id, target=asg["target"])
+            self._audit("assign", "rejected", by="owner", task=asg_id, target=asg["target"], **extra)
             return cos.public_assignment(asg)
         if action == "approve":
-            policy = self.store.policy()
-            if not policy.cos_can_assign or not policy.accepts(asg["target"]):
-                raise A2AError(UNAUTHORIZED, "assignments are off, or this Bot no longer accepts them")
-            self._audit("assign", "approved", by="owner", task=asg_id, target=asg["target"])
-            self._send_assignment(asg_id)
+            if not policy.cos_can_assign or not all(policy.accepts(r["target"]) for r in group):
+                raise A2AError(UNAUTHORIZED, "assignments are off, or a Bot here no longer accepts them")
+            # One approval record for the whole item, over the exact text shown on the page.
+            approval = cos.new_approval(asg, now)
+            for r in group:
+                r["approval"] = dict(approval)
+            self.cos.save("assignments", rows, cos.ASSIGN_KEEP)
+            self._audit("assign", "approved", by="owner", task=asg_id, target=asg["target"],
+                        approval=approval["id"], sha256=approval["sha256"], **extra)
+            for r in group:
+                self._send_assignment(r["id"])
             return cos.public_assignment(self._find_assignment(self.cos.load("assignments"), asg_id))
-        raise A2AError(INVALID_PARAMS, "action must be approve, edit, reject, cancel or seen")
+        raise A2AError(INVALID_PARAMS, "action must be approve, edit, reject, resend, cancel or seen")
 
     def cancel_assignment(self, caller: str, asg_id: str, *, as_owner: bool = False) -> dict:
         rows = self.cos.load("assignments")

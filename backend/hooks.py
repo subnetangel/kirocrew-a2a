@@ -452,7 +452,10 @@ async def _handle_entry(svc: A2AService, path: Path) -> None:
         elif op == "inbox":
             _write_result(store, rid, {"ok": True, "inbox": svc.inbox(caller)})
         elif op == "assign":
-            asg = await svc.assign(caller, label, str(entry.get("agent") or ""), str(entry.get("title") or ""),
+            agents = entry.get("agents")
+            target = ([str(a) for a in agents][:64] if isinstance(agents, list) and agents
+                      else str(entry.get("agent") or ""))
+            asg = await svc.assign(caller, label, target, str(entry.get("title") or ""),
                                    str(entry.get("brief") or ""), str(entry.get("done_when") or ""),
                                    str(entry.get("kind") or "change"))
             _write_result(store, rid, {"ok": True, "assignment": asg})

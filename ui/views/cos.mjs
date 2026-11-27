@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { API } from '../lib/api.mjs'
-import { MODE_HELP, OPEN, STATUS_TONE, STATUS_WORD, ageText, effectiveMode, modeOptions, parseTerms, usesYolo } from '../lib/cos.mjs'
+import { KIND_WORD, MODE_HELP, OPEN, RESENDABLE, STATUS_TONE, STATUS_WORD, ageText, effectiveMode, groupAssignments, modeOptions, parseTerms, usesYolo } from '../lib/cos.mjs'
 import { Button, Empty, ErrorBox, Icon, Pill, Section, Skeleton, h, plural } from '../lib/ui.mjs'
 
 const POLL_MS = 15000
@@ -32,16 +32,37 @@ function YoloConfirm({ onConfirm, onCancel }) {
       h(Button, { kind: 'danger', icon: 'TriangleAlert', onClick: onConfirm }, 'Turn on YOLO')))
 }
 
-function Assignment({ a, name, onAct, busy }) {
+/** One target's row: its status, its last note or reply, and the per-target actions. */
+function TargetRow({ a, name, onAct, busy }) {
+  const open = OPEN.has(a.status)
+  return h('li', { className: 'a2a-asg-target' },
+    h('div', { className: 'a2a-asg-head' },
+      h('strong', null, name(a.target)),
+      h(Pill, { tone: STATUS_TONE[a.status] || 'info' }, STATUS_WORD[a.status] || a.status),
+      a.unread ? h('span', { className: 'a2a-tab-badge is-info' }, 'unread') : null),
+    a.last_note ? h(Peer, { label: `Last note or reply from ${name(a.target)}` }, a.last_note) : null,
+    h('div', { className: 'a2a-row-gap' },
+      RESENDABLE.has(a.status) ? h(Button, { icon: 'RotateCw', disabled: busy, onClick: () => onAct(a, 'resend') }, 'Resend') : null,
+      open && a.status !== 'queued' ? h(Button, { kind: 'quiet', icon: 'X', disabled: busy, onClick: () => onAct(a, 'cancel') }, 'Cancel') : null,
+      a.unread ? h(Button, { kind: 'quiet', disabled: busy, onClick: () => onAct(a, 'seen') }, 'Mark seen') : null))
+}
+
+/** One item the owner decides on: a single assignment, or a broadcast to several Bots. */
+function Assignment({ g, name, onAct, busy }) {
+  const a = g.head
   const [editing, setEditing] = useState(false)
   const [edit, setEdit] = useState({ title: a.title, brief: a.brief, done_when: a.done_when })
-  const open = OPEN.has(a.status)
-  return h('li', { className: `a2a-asg ${a.unread ? 'is-unread' : ''}` },
+  const waiting = a.status === 'queued'
+  const modes = [...new Set(g.rows.map(r => r.mode))].join(', ')
+  const targets = a.all ? `all Bots (${g.rows.length})` : g.rows.map(r => name(r.target)).join(', ')
+  const apr = a.approval
+  return h('li', { className: `a2a-asg ${g.rows.some(r => r.unread) ? 'is-unread' : ''}` },
     h('div', { className: 'a2a-asg-head' },
-      h(Pill, { tone: STATUS_TONE[a.status] || 'info' }, STATUS_WORD[a.status] || a.status),
-      h('span', null, `${name(a.by)} to ${name(a.target)}`),
-      h('span', { className: 'a2a-faint' }, `${a.kind === 'read' ? 'read-only' : 'change'} · ${a.mode} · ${ageText(a.age_secs)}`),
-      a.unread ? h('span', { className: 'a2a-tab-badge is-info' }, 'unread') : null),
+      waiting ? h(Pill, { tone: 'working' }, 'Waiting for you') : null,
+      h('span', null, `${name(a.by)} to ${targets}`),
+      h('span', { className: 'a2a-faint' }, `${KIND_WORD[a.kind] || a.kind} · mode ${modes} · ${ageText(a.age_secs)}`)),
+    a.kind === 'instruction' ? h('p', { className: 'a2a-faint' },
+      'Standing instruction: once you approve, each Bot is told it is your own approved instruction and follows it until you say otherwise. Irreversible steps still need your approval in that Bot.') : null,
     editing
       ? h('div', { className: 'a2a-asg-edit' },
         ['title', 'brief', 'done_when'].map(k => h('label', { key: k },
@@ -49,20 +70,22 @@ function Assignment({ a, name, onAct, busy }) {
           h(k === 'brief' ? 'textarea' : 'input', { value: edit[k], maxLength: { title: 120, brief: 2000, done_when: 300 }[k],
             rows: k === 'brief' ? 6 : undefined, onChange: e => setEdit({ ...edit, [k]: e.target.value }) }))))
       : h('div', null,
-        h(Peer, { label: 'Title, written by the Chief of Staff' }, a.title),
-        h('details', null, h('summary', null, 'Brief and done-when'),
-          h(Peer, { label: 'Brief' }, a.brief), h('p', { className: 'a2a-faint' }, 'Done when:'), h(Peer, { label: 'Done when' }, a.done_when || '(not given)'))),
-    a.last_note ? h('div', null, h('span', { className: 'a2a-faint' }, 'Last note: '), h(Peer, { label: 'Last note' }, a.last_note)) : null,
-    h('div', { className: 'a2a-row-gap' },
-      a.status === 'queued' && !editing ? [
-        h(Button, { key: 'ap', kind: 'primary', icon: 'Check', disabled: busy, onClick: () => onAct(a, 'approve') }, 'Approve'),
+        waiting ? h('p', { className: 'a2a-faint' }, 'This is the exact text you approve. Its sha256 is recorded with your approval, and a2a refuses to send it if it changes.') : null,
+        h('p', { className: 'a2a-faint' }, 'Title:'), h(Peer, { label: 'Title, written by the Chief of Staff' }, a.title),
+        h('p', { className: 'a2a-faint' }, 'Brief:'), h(Peer, { label: 'Brief' }, a.brief),
+        h('p', { className: 'a2a-faint' }, 'Done when:'), h(Peer, { label: 'Done when' }, a.done_when || '(not given)')),
+    apr ? h('p', { className: 'a2a-faint' }, `Approved by you ${String(apr.at || '').replace('T', ' ').slice(0, 16)} UTC · ${apr.id} · sha256 ${String(apr.sha256 || '').slice(0, 12)}…`)
+      : (!waiting ? h('p', { className: 'a2a-faint' }, `Sent without a per-item review (mode ${modes}).`) : null),
+    waiting ? null : h('ul', { className: 'a2a-asg-targets', 'aria-label': 'Delivery per Bot' },
+      g.rows.map(r => h(TargetRow, { key: r.id, a: r, name, onAct, busy }))),
+    waiting ? h('div', { className: 'a2a-row-gap' },
+      !editing ? [
+        h(Button, { key: 'ap', kind: 'primary', icon: 'Check', disabled: busy, onClick: () => onAct(a, 'approve') },
+          g.rows.length > 1 ? `Approve for ${g.rows.length} Bots` : 'Approve'),
         h(Button, { key: 'ed', icon: 'Pencil', disabled: busy, onClick: () => setEditing(true) }, 'Edit'),
-        h(Button, { key: 'rj', icon: 'X', disabled: busy, onClick: () => onAct(a, 'reject') }, 'Reject')] : null,
-      editing ? [
+        h(Button, { key: 'rj', icon: 'X', disabled: busy, onClick: () => onAct(a, 'reject') }, 'Reject')] : [
         h(Button, { key: 'sv', kind: 'primary', disabled: busy, onClick: async () => { await onAct(a, 'edit', edit); setEditing(false) } }, 'Save edit'),
-        h(Button, { key: 'cx', onClick: () => setEditing(false) }, 'Keep as is')] : null,
-      open && a.status !== 'queued' ? h(Button, { kind: 'quiet', icon: 'X', disabled: busy, onClick: () => onAct(a, 'cancel') }, 'Cancel') : null,
-      a.unread ? h(Button, { kind: 'quiet', disabled: busy, onClick: () => onAct(a, 'seen') }, 'Mark seen') : null))
+        h(Button, { key: 'cx', onClick: () => setEditing(false) }, 'Keep as is')]) : null)
 }
 
 function Brief({ b, name }) {
@@ -111,8 +134,9 @@ export default function ChiefOfStaff({ client, draft, setDraft, saved, name, sav
     try { await client.post(`${API}${path}`, body); await load() } catch (e) { setActErr(e) } finally { setBusy(false) }
   }
   const onAsg = (a, action, edits) => act(`/assignments/${encodeURIComponent(a.id)}`, { action, edits })
-  const queued = view.assignments.filter(a => a.status === 'queued')
-  const others = view.assignments.filter(a => a.status !== 'queued')
+  const items = groupAssignments(view.assignments)
+  const queued = items.filter(g => g.head.status === 'queued')
+  const others = items.filter(g => g.head.status !== 'queued')
   const accepts = id => (draft.accepts_assignments || {})[id] !== false
   const savedYolo = usesYolo(saved)
 
@@ -206,10 +230,10 @@ export default function ChiefOfStaff({ client, draft, setDraft, saved, name, sav
           h('td', { className: 'a2a-faint' }, effectiveMode(draft, b.id, ceiling)))))),
       saveBar,
       h('h3', null, `Waiting for you (${queued.length})`),
-      queued.length ? h('ul', { className: 'a2a-asgs' }, queued.map(a => h(Assignment, { key: a.id, a, name, onAct: onAsg, busy })))
+      queued.length ? h('ul', { className: 'a2a-asgs' }, queued.map(g => h(Assignment, { key: g.id, g, name, onAct: onAsg, busy })))
         : h('p', { className: 'a2a-faint' }, 'Nothing waiting.'),
-      h('h3', null, 'All assignments'),
-      others.length ? h('ul', { className: 'a2a-asgs' }, others.map(a => h(Assignment, { key: a.id, a, name, onAct: onAsg, busy })))
+      h('h3', null, 'All assignments and instructions'),
+      others.length ? h('ul', { className: 'a2a-asgs' }, others.map(g => h(Assignment, { key: g.id, g, name, onAct: onAsg, busy })))
         : h('p', { className: 'a2a-faint' }, 'None yet.'),
       h('p', { className: 'a2a-faint' }, 'Cancel stops a2a from following the work; it cannot stop a turn the Bot already started.')))
 }

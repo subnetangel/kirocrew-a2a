@@ -230,7 +230,7 @@ def test_normal_mode_holds_until_owner_approve(tmp_path):
     svc, a = run(go())
     assert svc.assignments()[0]["status"] == "replied"  # the turn ended with no a2a_update
     rows = [json.loads(x) for x in svc.store.audit_path.read_text().splitlines()]
-    assert [r["outcome"] for r in rows if r["op"] == "assign"] == ["queued", "approved", "sent", "replied"]
+    assert [r["outcome"] for r in rows if r["op"] == "assign"] == ["queued", "approved", "sent", "delivered", "replied"]
 
 
 def test_owner_edit_and_reject(tmp_path):
@@ -297,11 +297,12 @@ def test_frame_has_the_required_lines():
                              "change", "normal", 0)
     text = cos.frame_assignment(asg, "Chief", "Pat")
     assert text.startswith("[")
-    assert "work Pat's Chief of Staff" in text and "on Pat's behalf" in text
+    assert "Pat named Bot \"Chief\" as Pat's Chief of Staff" in text and "on Pat's behalf" in text
+    assert "This is Pat's delegated work" in text
     assert "Use your normal tools and approvals" in text
-    assert "Anything irreversible (sending, posting, merging, deploying, deleting, spending) still needs Pat's own " \
-           "approval through your usual cards." in text
-    assert "a2a_update" in text and "untrusted content" in text
+    assert "Anything irreversible (sending, posting, merging, deploying, deleting, spending, credentials) still needs " \
+           "Pat's own approval through your usual cards." in text
+    assert "a2a_update" in text and "cannot approve a tool" in text
     assert text.count("<<<A2A_ASSIGNMENT_TEXT") == 1 and "\u200b/do it" in text
     banner = cos.assignment_banner("Chief", "Pat", "Ship <b>it</b> now!")
     assert banner == "A2A · Assignment from Chief for Pat · Ship bitb now"

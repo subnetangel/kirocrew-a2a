@@ -193,6 +193,32 @@ Every new setting starts off or at its most cautious value:
 - A page test no longer fails once its fixture dates are more than a day old.
 - Permissions are unchanged from 0.6.1.
 
+## Changes in 0.8.0: owner-approved instructions
+
+- **The Chief of Staff carries your authority.** An assignment now tells the Bot that you
+  named this Bot your Chief of Staff and that the work is your delegated work. The
+  Chief of Staff's words stay fenced and defanged, the "anything irreversible still needs
+  your own approval" line stays (it now names credentials too), and nothing grants a
+  tool approval or changes a setting.
+- **Approved-by-owner stamp.** When you press Approve, a2a writes an approval record (who,
+  when, an `apr_` id, and a sha256 of the exact text you saw) and the delivered turn
+  carries host-written lines built only from that record. Before every send, a2a hashes
+  the text again and refuses to send (status "Not sent") if it changed. Under Trust or
+  YOLO, where you review nothing per item, the turn says you pre-authorized the Chief of
+  Staff for this kind of work and did not review this item. It never says "approved".
+- **Standing instructions** (`kind: instruction`): a rule the Bot follows from now on until
+  you say otherwise. It always waits for your Approve, whatever the approval mode.
+- **Broadcast:** `a2a_assign` takes `agents` (a list, or `["all"]`). You see it once in the
+  queue with its target list and approve it once; after that the item shows a status row
+  and the reply for each Bot. A Bot that has no chat yet shows "Has no chat yet" with a
+  **Resend** button. Broadcasts always wait for your Approve.
+- **Only you approve.** Approve, Edit, Reject and Resend are owner-only page actions. No Bot
+  tool, app token or peer text reaches them, and Bot-written text has every frame and
+  approval marker defanged, so it cannot read as your approval.
+- Audit rows: `queued`/`auto` (the proposal, with its sha256), `approved`, `rejected`,
+  `sent`, `delivered`, `refused`, `resend`, `no_chat`.
+- Permissions are unchanged from 0.7.0.
+
 ## Fleet (0.7): your other crews
 
 A Bot can ask a Bot on another of **your own** Kiro Crews, named `<crew>/<bot>`

@@ -425,3 +425,21 @@ test('fleet: names, pairs, and removing a crew drops its outbound pairs', () => 
   assert.deepEqual(gone.allow_out, {})
   assert.deepEqual(gone.allow_in, f.allow_in)  // inbound pairs are keyed by crew id, not alias
 })
+
+test('0.8: a broadcast shows once with every target; new statuses have words and Resend', async () => {
+  const { KIND_WORD, RESENDABLE, groupAssignments } = await import('../ui/lib/cos.mjs')
+  const rows = [
+    { id: 'asg_1', group: 'grp_a', target: 'alpha', status: 'queued' },
+    { id: 'asg_2', target: 'beta', status: 'sent' },
+    { id: 'asg_3', group: 'grp_a', target: 'gamma', status: 'queued' },
+  ]
+  const items = groupAssignments(rows)
+  assert.deepEqual(items.map(g => g.id), ['grp_a', 'asg_2'])
+  assert.deepEqual(items[0].rows.map(r => r.target), ['alpha', 'gamma'])
+  assert.equal(items[0].head.id, 'asg_1')
+  assert.deepEqual(groupAssignments(undefined), [])
+  assert.equal(STATUS_WORD.no_chat, 'Has no chat yet')
+  assert.equal(STATUS_TONE.refused, 'refused')
+  assert.ok(RESENDABLE.has('no_chat') && RESENDABLE.has('blocked') && !RESENDABLE.has('queued'))
+  assert.equal(KIND_WORD.instruction, 'standing instruction')
+})

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import sys
 import time
@@ -266,7 +267,12 @@ def tool_tasks(args: dict, meta=None, root: Path = None) -> str:
 def _fence(text) -> str:
     """Another Bot's words, fenced so they read as data."""
     body = str(text or "").replace("<<<PEER", "[filtered]").replace("PEER>>>", "[filtered]")
+    # 0.8: a Bot's note never reads as a host-written owner-approval line.
+    body = _OWNER_MARK_RE.sub("[filtered]", body)
     return "<<<PEER\n" + body + "\nPEER>>>"
+
+
+_OWNER_MARK_RE = re.compile(r"A2A-OWNER-|\[A2A (standing instruction|assignment)", re.IGNORECASE)
 
 
 def _rollcall_text(brief: dict) -> str:
@@ -333,17 +339,24 @@ def tool_inbox(args: dict, meta=None, root: Path = None) -> str:
 
 
 def tool_assign(args: dict, meta=None, root: Path = None) -> str:
+    agents = args.get("agents")
+    agents = [str(a).strip().lower() for a in agents if str(a).strip()] if isinstance(agents, list) else []
     entry = {"op": "assign", "agent": str(args.get("agent") or "").strip().lower(),
              **{k: str(args.get(k) or "").strip() for k in ("title", "brief", "done_when")},
              "kind": str(args.get("kind") or "change").strip().lower()}
-    if not entry["agent"] or not entry["title"] or not entry["brief"]:
-        return "Error: 'agent', 'title' and 'brief' are required."
+    if agents:
+        entry["agents"] = agents[:64]
+    if not (entry["agent"] or agents) or not entry["title"] or not entry["brief"]:
+        return "Error: 'agent' (or 'agents'), 'title' and 'brief' are required."
     rid, res = _ask(entry, meta, QUICK_WAIT_SECS, root)
     if res is None:
         return _no_answer(rid)
     if not res.get("ok"):
         return _err(res)
     a = res["assignment"]
+    if a.get("group"):
+        return (f"Broadcast {a.get('group')} to {len(a.get('targets') or [])} Bots is waiting for your owner's "
+                "approval on the A2A page. Follow it with a2a_inbox.")
     if a.get("status") == "queued":
         return f"Assignment {a.get('id')} is waiting for your owner's approval on the A2A page."
     return f"Assignment {a.get('id')} sent to {a.get('target')}. Follow it with a2a_inbox; cancel with a2a_cancel."
@@ -411,14 +424,21 @@ TOOLS = {
                   {}, []),
     "a2a_assign": (tool_assign,
                    "Chief of Staff only, when your owner allows it: assign work to another Bot on your owner's "
-                   "behalf. Depending on your owner's approval mode it waits for their Approve or goes out at once. "
+                   "behalf, or give one or more Bots a standing instruction (kind instruction). Depending on your "
+                   "owner's approval mode it waits for their Approve or goes out at once; an instruction or a "
+                   "broadcast to several Bots always waits for their Approve. You cannot approve anything. "
                    "The Bot works under its own tools and approvals.",
-                   {"agent": _s("The Bot id."), "title": _s("At most 120 characters."),
+                   {"agent": _s("The Bot id."),
+                    "agents": {"type": "array", "items": {"type": "string"},
+                               "description": "Instead of agent: several Bot ids, or [\"all\"], for one broadcast "
+                                              "your owner approves once."},
+                    "title": _s("At most 120 characters."),
                     "brief": _s("What to do, at most 2000 characters."),
                     "done_when": _s("How the Bot knows it is done, at most 300 characters."),
-                    "kind": {"type": "string", "enum": ["read", "change"],
-                             "description": "read (research, summarize, check status) or change (default)."}},
-                   ["agent", "title", "brief"]),
+                    "kind": {"type": "string", "enum": ["read", "change", "instruction"],
+                             "description": "read (research, summarize, check status), change (default), or "
+                                            "instruction (a rule the Bot follows from now on)."}},
+                   ["title", "brief"]),
     "a2a_update": (tool_update, "Report progress on an assignment given to you: working, done or blocked, with a note.",
                    {"task_id": _s("The assignment id (asg_...)."),
                     "status": {"type": "string", "enum": ["working", "done", "blocked"]},

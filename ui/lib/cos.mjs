@@ -58,11 +58,34 @@ export function ageText(secs) {
 export const STATUS_TONE = {
   queued: 'working', sent: 'working', working: 'working', done: 'answered', blocked: 'failed',
   canceled: 'info', rejected: 'refused', stale: 'info', replied: 'info', no_reply: 'failed',
+  no_chat: 'info', refused: 'refused',
 }
 
 export const STATUS_WORD = {
   queued: 'Waiting for you', sent: 'Sent', working: 'Working', done: 'Done', blocked: 'Blocked',
   canceled: 'Canceled', rejected: 'Rejected', stale: 'Stale', replied: 'Replied, no update', no_reply: 'No reply',
+  no_chat: 'Has no chat yet', refused: 'Not sent',
 }
 
 export const OPEN = new Set(['queued', 'sent', 'working'])
+
+/** States the owner may press Resend on (the backend re-checks the approval). */
+export const RESENDABLE = new Set(['no_chat', 'blocked'])
+
+export const KIND_WORD = { read: 'read-only', change: 'change', instruction: 'standing instruction' }
+
+/**
+ * One entry per item the owner decides on: a broadcast's rows (same ``group``) become one
+ * entry with every target, in the order the rows came; a single assignment is its own entry.
+ */
+export function groupAssignments(rows) {
+  const out = []
+  const byGroup = new Map()
+  for (const a of rows || []) {
+    if (!a.group) { out.push({ id: a.id, head: a, rows: [a] }); continue }
+    let g = byGroup.get(a.group)
+    if (!g) { g = { id: a.group, head: a, rows: [] }; byGroup.set(a.group, g); out.push(g) }
+    g.rows.push(a)
+  }
+  return out
+}
